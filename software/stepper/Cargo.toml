@@ -3,6 +3,11 @@ name = "stepper"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = ["step-dir"]
+step-dir = []
+servo42c = ["dep:mks-servo42-rs"]
+
 [dependencies]
 # ESP32-C3 bare-metal HAL (1.0.0 released 2025-10-30)
 esp-hal = { version = "1.0.0", features = ["esp32c3", "unstable", "defmt"] }
@@ -27,6 +32,12 @@ rtt-target = { version = "0.6.2", features = ["defmt"] }
 # SK6812 LED driver via RMT peripheral
 esp-hal-smartled2 = "0.28.1"
 smart-leds = "0.4.0"
+
+# MKS SERVO42C driver (command formatter, optional)
+mks-servo42-rs = { version = "1.0.3", optional = true }
+
+# Embedded I/O traits (for UART read/write in servo42c backend)
+embedded-io = "0.6"
 
 critical-section = "1.2.0"
 
