@@ -1,0 +1,45 @@
+[package]
+name = "stepper"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# ESP32-C3 bare-metal HAL (1.0.0 released 2025-10-30)
+esp-hal = { version = "1.0.0", features = ["esp32c3", "unstable", "defmt"] }
+
+# Panic handler with defmt output
+esp-backtrace = { version = "0.18.1", features = [
+    "esp32c3",
+    "panic-handler",
+    "defmt",
+] }
+
+# Bootloader support — provides linker scripts, memory layout, and the
+# esp_app_desc!() macro required by the ESP-IDF second-stage bootloader.
+esp-bootloader-esp-idf = { version = "0.4.0", features = ["esp32c3", "defmt"] }
+
+# defmt logging framework
+defmt = "1.0.1"
+
+# RTT transport for defmt (probe-rs reads this)
+rtt-target = { version = "0.6.2", features = ["defmt"] }
+
+# SK6812 LED driver via RMT peripheral
+esp-hal-smartled2 = "0.28.1"
+smart-leds = "0.4.0"
+
+critical-section = "1.2.0"
+
+# Force riscv-rt to include device.x in its link.x (provides DefaultHandler stubs)
+riscv-rt = { version = "0.16.0", features = ["device"] }
+
+[profile.dev]
+# Shrink dev builds so they fit in flash; debug info kept for probe-rs
+opt-level = "s"
+debug = true
+
+[profile.release]
+codegen-units = 1
+debug = false
+lto = true
+opt-level = 3

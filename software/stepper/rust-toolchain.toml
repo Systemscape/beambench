@@ -1,0 +1,4 @@
+# Standard Rust nightly — no custom Xtensa toolchain needed for RISC-V targets.
+[toolchain]
+channel = "nightly"
+targets = ["riscv32imc-unknown-none-elf"]

@@ -1,0 +1,27 @@
+[build]
+# ESP32-C3 is RISC-V — works with the standard Rust nightly toolchain.
+# No espup / Xtensa LLVM fork required.
+target = "riscv32imc-unknown-none-elf"
+rustflags = [
+  # device.x: weak DefaultHandler stubs for all peripheral interrupts (from esp32c3 PAC)
+  "-C", "link-arg=-Tdevice.x",
+  # defmt.x: preserves the .defmt section so probe-rs can decode log frames
+  "-C", "link-arg=-Tdefmt.x",
+  # linkall.x: memory layout, __stack_chk_guard, section definitions (from esp-hal; must be last)
+  "-C", "link-arg=-Tlinkall.x",
+]
+
+# build-std is required: the prebuilt core from rustup doesn't include the
+# weak interrupt-handler symbols that esp-riscv-rt needs, causing linker errors
+# for every ESP32-C3 interrupt vector (GPIO, WIFI_MAC, etc.) and __stack_chk_guard.
+[unstable]
+build-std = ["core"]
+
+[target.riscv32imc-unknown-none-elf]
+# Flash via the C3U's built-in USB-JTAG interface (no external probe needed):
+#   cargo run
+# Requires probe-rs: cargo install probe-rs-tools
+runner = "probe-rs run --chip esp32c3 --always-print-stacktrace"
+
+[env]
+DEFMT_LOG = "info"
