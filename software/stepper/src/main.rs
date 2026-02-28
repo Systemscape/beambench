@@ -1,17 +1,20 @@
-//! Minimal step/dir driver for MKS SERVO42D/57D on M5Stamp C3U (ESP32-C3).
+//! Minimal step/dir driver for MKS SERVO42D/57D on ESP32-C3-DevKit-RUST-1.
 //!
 //! Wiring:
 //!
-//!   C3U 3.3V     ──► SERVO42D COM  (common anode, must match signal level)
-//!   C3U GPIO4    ──► SERVO42D STP  (step pulse)
-//!   C3U GPIO5    ──► SERVO42D DIR  (direction)
-//!   C3U GPIO6    ──► SERVO42D EN   (enable, active level configurable via menu)
+//!   3.3V         ──► SERVO42D COM  (common anode, must match signal level)
+//!   GPIO4        ──► SERVO42D STP  (step pulse)
+//!   GPIO5        ──► SERVO42D DIR  (direction)
+//!   GPIO6        ──► SERVO42D EN   (enable, active level configurable via menu)
 //!   GND          ──  GND
 //!   12-24V       ──► SERVO42D V+
 //!
-//! GPIO18/19 are the built-in USB-Serial bridge on the C3U; leave them free.
-//! GPIO9: on-board button (active low, internal pull-up).
-//! GPIO2: on-board SK6812 RGB LED.
+//! GPIO18/19: USB-Serial/JTAG — leave free.
+//! GPIO9:  on-board button (active low, boot button).
+//! GPIO2:  on-board WS2812 RGB LED.
+//! GPIO7:  on-board plain LED.
+//! GPIO8:  I2C SCL (shared with SHTC3 + ICM-42670-P).
+//! GPIO10: I2C SDA (shared with SHTC3 + ICM-42670-P).
 
 #![no_std]
 #![no_main]
