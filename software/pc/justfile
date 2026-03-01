@@ -1,0 +1,20 @@
+# Development: run Axum backend + Vite dev server
+dev:
+    #!/usr/bin/env bash
+    cd frontend && pnpm run dev &
+    VITE_PID=$!
+    cargo run -- --dev
+    kill $VITE_PID 2>/dev/null
+
+# Build for release: compile Svelte to static files, build Rust binary
+build:
+    cd frontend && pnpm run build
+    cargo build --release
+
+# Run release build (serves embedded frontend)
+run:
+    cargo run --release
+
+# Check Rust code only
+check:
+    cargo check

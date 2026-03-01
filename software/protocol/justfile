@@ -1,0 +1,5 @@
+# Protocol crate — shared message types
+
+# Check for host target
+check:
+    cargo check

@@ -1,12 +1,7 @@
 [package]
-name = "stepper"
+name = "beambench-tx"
 version = "0.1.0"
 edition = "2021"
-
-[features]
-default = ["step-dir"]
-step-dir = []
-servo42c = ["dep:mks-servo42-rs"]
 
 [dependencies]
 # ESP32-C3 bare-metal HAL
@@ -44,6 +39,7 @@ esp-bootloader-esp-idf = { version = "0.4.0", features = ["esp32c3", "defmt"] }
 
 # Async executor and utilities
 embassy-executor = "0.9.1"
+embassy-futures = "0.1"
 embassy-sync = "0.7"
 embassy-time = "0.5.0"
 static_cell = "2"
@@ -52,20 +48,10 @@ static_cell = "2"
 defmt = "1.0.1"
 rtt-target = { version = "0.6.2", features = ["defmt"] }
 
-# SK6812 LED driver via RMT peripheral
-esp-hal-smartled2 = "0.28.1"
-smart-leds = "0.4.0"
-
-# MKS SERVO42C driver (command formatter, optional)
-mks-servo42-rs = { version = "1.0.3", optional = true }
-
-# Embedded I/O traits (for UART read/write in servo42c backend)
-embedded-io = "0.7.1"
-
 # Shared protocol types
 beambench-protocol = { path = "../protocol", features = ["defmt"] }
+postcard = "1"
 
-heapless = "0.9.2"
 critical-section = "1.2.0"
 
 [profile.dev]

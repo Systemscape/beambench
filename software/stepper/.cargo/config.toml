@@ -15,7 +15,7 @@ rustflags = [
 # weak interrupt-handler symbols that esp-riscv-rt needs, causing linker errors
 # for every ESP32-C3 interrupt vector (GPIO, WIFI_MAC, etc.) and __stack_chk_guard.
 [unstable]
-build-std = ["core"]
+build-std = ["core", "alloc"]
 
 [target.riscv32imc-unknown-none-elf]
 # Flash via the C3U's built-in USB-JTAG interface (no external probe needed):

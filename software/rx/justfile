@@ -1,0 +1,13 @@
+# TX (transmitter) firmware
+
+# Build firmware
+build:
+    cargo build --release
+
+# Build and flash to connected board via probe-rs
+flash:
+    cargo run --release
+
+# Check without flashing
+check:
+    cargo check
