@@ -73,23 +73,33 @@
 				r,
 				theta,
 				name: 'RSSI',
-				marker: { size: 4 }
+				line: { color: '#fff', width: 1.5 },
+				marker: { size: 3, color: '#fff' }
 			}
 		];
 
 		const layout = {
 			polar: {
+				bgcolor: '#1a1a1a',
 				radialaxis: {
-					title: { text: 'RSSI (dBm)' },
+					title: { text: 'RSSI (dBm)', font: { color: '#888' } },
 					angle: 90,
-					tickangle: 90
+					tickangle: 90,
+					gridcolor: '#2a2a2a',
+					linecolor: '#333',
+					tickfont: { color: '#666' }
 				},
 				angularaxis: {
 					direction: 'clockwise' as const,
-					period: 360
+					period: 360,
+					gridcolor: '#2a2a2a',
+					linecolor: '#333',
+					tickfont: { color: '#666' }
 				}
 			},
 			showlegend: false,
+			paper_bgcolor: '#1a1a1a',
+			plot_bgcolor: '#1a1a1a',
 			margin: { t: 40, b: 40, l: 40, r: 40 }
 		};
 
@@ -166,22 +176,31 @@
 		<div class="sidebar">
 			<section>
 				<h2>Connection</h2>
-				<div class="field">
-					<label for="port">Serial Port</label>
-					<div class="port-row">
+				{#if ports.length > 0}
+					<div class="field">
 						<select id="port" bind:value={selectedPort}>
 							{#each ports as port}
 								<option value={port}>{port}</option>
 							{/each}
 						</select>
-						<button onclick={fetchPorts}>Refresh</button>
 					</div>
-				</div>
-				{#if status.serial_connected}
-					<button onclick={disconnectSerial}>Disconnect</button>
 				{:else}
-					<button onclick={connectSerial} disabled={!selectedPort}>Connect</button>
+					<div class="field">
+						<input
+							id="port"
+							bind:value={selectedPort}
+							placeholder="tcp://127.0.0.1:9876"
+						/>
+					</div>
 				{/if}
+				<div class="connect-row">
+					{#if status.serial_connected}
+						<button onclick={disconnectSerial}>Disconnect</button>
+					{:else}
+						<button onclick={connectSerial} disabled={!selectedPort}>Connect</button>
+					{/if}
+					<button class="secondary" onclick={fetchPorts}>Refresh</button>
+				</div>
 				<div class="status-indicators">
 					<span class="indicator" class:active={status.serial_connected}>Serial</span>
 					<span class="indicator" class:active={status.tx_connected}>TX</span>
@@ -235,46 +254,49 @@
 	:global(body) {
 		margin: 0;
 		font-family: system-ui, -apple-system, sans-serif;
-		background: #1a1a2e;
-		color: #e0e0e0;
+		background: #111;
+		color: #ddd;
 	}
 
 	main {
-		padding: 1rem;
+		padding: 1.5rem;
 		max-width: 1400px;
 		margin: 0 auto;
 	}
 
 	h1 {
-		margin: 0 0 1rem;
-		font-size: 1.5rem;
-		color: #00d4ff;
+		margin: 0 0 1.25rem;
+		font-size: 1.4rem;
+		font-weight: 600;
+		color: #fff;
 	}
 
 	h2 {
 		margin: 0 0 0.75rem;
-		font-size: 1rem;
-		color: #aaa;
+		font-size: 0.75rem;
+		font-weight: 600;
+		color: #888;
 		text-transform: uppercase;
-		letter-spacing: 0.05em;
+		letter-spacing: 0.08em;
 	}
 
 	.error {
-		background: #ff4444;
+		background: #d32f2f;
 		color: white;
 		padding: 0.5rem 1rem;
 		border-radius: 4px;
 		margin-bottom: 1rem;
+		font-size: 0.85rem;
 	}
 
 	.layout {
 		display: flex;
-		gap: 1rem;
+		gap: 1.5rem;
 		height: calc(100vh - 6rem);
 	}
 
 	.sidebar {
-		width: 280px;
+		width: 300px;
 		flex-shrink: 0;
 		display: flex;
 		flex-direction: column;
@@ -282,72 +304,84 @@
 	}
 
 	section {
-		background: #16213e;
-		border-radius: 8px;
+		background: #1a1a1a;
+		border: 1px solid #2a2a2a;
+		border-radius: 6px;
 		padding: 1rem;
 	}
 
 	.field {
-		margin-bottom: 0.5rem;
+		margin-bottom: 0.6rem;
 	}
 
 	.field label {
 		display: block;
 		font-size: 0.8rem;
-		color: #888;
+		color: #777;
 		margin-bottom: 0.25rem;
 	}
 
 	input,
 	select {
 		width: 100%;
-		padding: 0.4rem;
+		padding: 0.45rem 0.5rem;
 		border: 1px solid #333;
 		border-radius: 4px;
-		background: #0f3460;
-		color: #e0e0e0;
-		font-size: 0.9rem;
+		background: #222;
+		color: #ddd;
+		font-size: 0.85rem;
 		box-sizing: border-box;
 	}
 
-	.port-row {
+	input:focus {
+		outline: none;
+		border-color: #555;
+	}
+
+	.connect-row {
 		display: flex;
 		gap: 0.5rem;
+		margin-top: 0.25rem;
 	}
 
-	.port-row select {
+	.connect-row button {
 		flex: 1;
-	}
-
-	.port-row button {
-		flex-shrink: 0;
-		padding: 0.4rem 0.6rem;
-		font-size: 0.8rem;
 	}
 
 	button {
 		padding: 0.5rem 1rem;
-		border: none;
+		border: 1px solid #444;
 		border-radius: 4px;
-		background: #0f3460;
-		color: #00d4ff;
+		background: #222;
+		color: #ddd;
 		cursor: pointer;
-		font-size: 0.9rem;
+		font-size: 0.85rem;
 		width: 100%;
 	}
 
 	button:hover:not(:disabled) {
-		background: #1a4a8a;
+		background: #333;
+		border-color: #555;
 	}
 
 	button:disabled {
-		opacity: 0.4;
+		opacity: 0.3;
 		cursor: not-allowed;
 	}
 
+	button.secondary {
+		color: #888;
+		border-color: #333;
+	}
+
 	button.danger {
-		background: #8b0000;
-		color: #ff6b6b;
+		background: #222;
+		color: #e53935;
+		border-color: #e53935;
+	}
+
+	button.danger:hover {
+		background: #2a1010;
 	}
 
 	.button-row {
@@ -361,29 +395,32 @@
 	}
 
 	.indicator {
-		font-size: 0.75rem;
+		font-size: 0.7rem;
 		padding: 0.2rem 0.5rem;
-		border-radius: 12px;
-		background: #333;
-		color: #888;
+		border-radius: 3px;
+		background: #222;
+		border: 1px solid #333;
+		color: #555;
 	}
 
 	.indicator.active {
-		background: #004d00;
-		color: #00ff00;
+		background: #111;
+		border-color: #4caf50;
+		color: #4caf50;
 	}
 
 	.info {
 		font-size: 0.8rem;
-		color: #888;
+		color: #666;
 		margin: 0.5rem 0 0;
 	}
 
 	.plot {
 		flex: 1;
 		min-height: 400px;
-		background: #16213e;
-		border-radius: 8px;
+		background: #1a1a1a;
+		border: 1px solid #2a2a2a;
+		border-radius: 6px;
 	}
 
 	a {

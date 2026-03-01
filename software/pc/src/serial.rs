@@ -38,6 +38,27 @@ impl SerialHandle {
         })
     }
 
+    /// Open a TCP connection (e.g. to rx-sim) and spawn reader/writer tasks.
+    pub async fn open_tcp(addr: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let stream = tokio::net::TcpStream::connect(addr).await?;
+        let (reader, writer) = tokio::io::split(stream);
+
+        let (cmd_tx, cmd_rx) = mpsc::channel::<PcToRx>(32);
+        let (resp_tx, resp_rx) = mpsc::channel::<RxToPc>(64);
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+
+        tokio::spawn(writer_task(writer, cmd_rx, cancel_rx.clone()));
+        tokio::spawn(reader_task(reader, resp_tx, cancel_rx));
+
+        info!("TCP connection to {} established", addr);
+
+        Ok(Self {
+            tx: cmd_tx,
+            rx: resp_rx,
+            cancel: cancel_tx,
+        })
+    }
+
     /// Close the serial connection.
     pub fn close(self) {
         let _ = self.cancel.send(true);
@@ -124,11 +145,28 @@ async fn reader_task<R: AsyncReadExt + Unpin>(
     }
 }
 
-/// List available serial ports.
-pub fn list_ports() -> Vec<String> {
-    tokio_serial::available_ports()
+/// Default address for the rx-sim simulator.
+const SIM_ADDR: &str = "127.0.0.1:9876";
+
+/// List available serial ports. Also probes the default rx-sim TCP address
+/// and includes it if reachable.
+pub async fn list_ports() -> Vec<String> {
+    let mut ports: Vec<String> = tokio_serial::available_ports()
         .unwrap_or_default()
         .into_iter()
         .map(|p| p.port_name)
-        .collect()
+        .collect();
+
+    // Quick probe: can we connect to the simulator?
+    if tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        tokio::net::TcpStream::connect(SIM_ADDR),
+    )
+    .await
+    .is_ok_and(|r| r.is_ok())
+    {
+        ports.insert(0, format!("tcp://{}", SIM_ADDR));
+    }
+
+    ports
 }

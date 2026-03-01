@@ -75,3 +75,37 @@ pub fn export_csv(data: &[DataPoint]) -> String {
     }
     csv
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn export_csv_empty() {
+        let csv = export_csv(&[]);
+        assert_eq!(csv, "angle_deg,rssi_dbm,sample_count\n");
+    }
+
+    #[test]
+    fn export_csv_with_data() {
+        let data = vec![
+            DataPoint {
+                angle_deg: 0.0,
+                rssi_dbm: -40.0,
+                sample_count: 10,
+            },
+            DataPoint {
+                angle_deg: 10.0,
+                rssi_dbm: -35.5,
+                sample_count: 10,
+            },
+        ];
+        let csv = export_csv(&data);
+        assert_eq!(
+            csv,
+            "angle_deg,rssi_dbm,sample_count\n\
+             0,-40,10\n\
+             10,-35.5,10\n"
+        );
+    }
+}

@@ -73,3 +73,123 @@ pub async fn run_sweep(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use beambench_protocol::RxToPc;
+    use heapless::String as HString;
+    use tokio::sync::{broadcast, mpsc};
+
+    fn test_config() -> SweepConfig {
+        SweepConfig {
+            start_deg: 0.0,
+            stop_deg: 20.0,
+            step_deg: 10.0,
+            samples_per_angle: 5,
+        }
+    }
+
+    #[tokio::test]
+    async fn sweep_collects_data_points() {
+        let (serial_tx, _serial_cmd_rx) = mpsc::channel::<PcToRx>(32);
+        let (resp_tx, resp_rx) = mpsc::channel::<RxToPc>(64);
+        let (ws_tx, mut ws_rx) = broadcast::channel::<WsEvent>(64);
+        let mut resp_rx = resp_rx;
+
+        let config = test_config();
+        let handle = tokio::spawn(async move { run_sweep(config, &serial_tx, &mut resp_rx, &ws_tx).await });
+
+        // Feed 3 data points then SweepComplete
+        for i in 0..3 {
+            resp_tx
+                .send(RxToPc::DataPoint {
+                    angle_deg: i as f32 * 10.0,
+                    rssi_dbm: -40.0 + i as f32,
+                    sample_count: 5,
+                })
+                .await
+                .unwrap();
+        }
+        resp_tx.send(RxToPc::SweepComplete).await.unwrap();
+
+        let result = handle.await.unwrap();
+        let data = result.expect("sweep should succeed");
+        assert_eq!(data.len(), 3);
+        assert_eq!(data[0].angle_deg, 0.0);
+        assert_eq!(data[1].angle_deg, 10.0);
+        assert_eq!(data[2].angle_deg, 20.0);
+
+        // Verify broadcast events: 3 DataPoints + 1 SweepComplete
+        let mut dp_count = 0;
+        let mut complete = false;
+        while let Ok(ev) = ws_rx.try_recv() {
+            match ev {
+                WsEvent::DataPoint(_) => dp_count += 1,
+                WsEvent::SweepComplete => complete = true,
+                _ => {}
+            }
+        }
+        assert_eq!(dp_count, 3);
+        assert!(complete);
+    }
+
+    #[tokio::test]
+    async fn sweep_handles_error() {
+        let (serial_tx, _serial_cmd_rx) = mpsc::channel::<PcToRx>(32);
+        let (resp_tx, resp_rx) = mpsc::channel::<RxToPc>(64);
+        let (ws_tx, mut ws_rx) = broadcast::channel::<WsEvent>(64);
+        let mut resp_rx = resp_rx;
+
+        let config = test_config();
+        let handle = tokio::spawn(async move { run_sweep(config, &serial_tx, &mut resp_rx, &ws_tx).await });
+
+        // Send one data point, then an error
+        resp_tx
+            .send(RxToPc::DataPoint {
+                angle_deg: 0.0,
+                rssi_dbm: -40.0,
+                sample_count: 5,
+            })
+            .await
+            .unwrap();
+        resp_tx
+            .send(RxToPc::Error {
+                description: HString::try_from("motor fault").unwrap(),
+            })
+            .await
+            .unwrap();
+
+        let result = handle.await.unwrap();
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "motor fault");
+
+        // Verify error was broadcast
+        let mut got_error = false;
+        while let Ok(ev) = ws_rx.try_recv() {
+            if let WsEvent::Error { message } = ev {
+                assert_eq!(message, "motor fault");
+                got_error = true;
+            }
+        }
+        assert!(got_error);
+    }
+
+    #[tokio::test]
+    async fn sweep_handles_disconnection() {
+        let (serial_tx, _serial_cmd_rx) = mpsc::channel::<PcToRx>(32);
+        let (resp_tx, resp_rx) = mpsc::channel::<RxToPc>(64);
+        let (ws_tx, _ws_rx) = broadcast::channel::<WsEvent>(64);
+        let mut resp_rx = resp_rx;
+
+        let config = test_config();
+        let handle = tokio::spawn(async move { run_sweep(config, &serial_tx, &mut resp_rx, &ws_tx).await });
+
+        // Drop the sender to simulate disconnection
+        drop(resp_tx);
+
+        let result = handle.await.unwrap();
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Serial connection lost");
+    }
+}

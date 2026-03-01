@@ -26,7 +26,7 @@ pub enum Role {
 // ── ESPNOW discovery messages ───────────────────────────────────────────────
 
 /// Broadcast periodically until paired.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct HelloBeacon {
     pub role: Role,
@@ -35,7 +35,7 @@ pub struct HelloBeacon {
 }
 
 /// Sent by RX to confirm pairing (unicast).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct PairConfirm {
     pub role: Role,
@@ -45,7 +45,7 @@ pub struct PairConfirm {
 // ── ESPNOW operational messages (RX ↔ Turntable) ────────────────────────────
 
 /// Command from RX to turntable.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum TurntableCommand {
     /// Move to an absolute angle in degrees.
@@ -55,7 +55,7 @@ pub enum TurntableCommand {
 }
 
 /// Response from turntable to RX.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum TurntableResponse {
     /// Successfully reached target position.
@@ -67,7 +67,7 @@ pub enum TurntableResponse {
 // ── ESPNOW operational messages (RX ↔ TX) ───────────────────────────────────
 
 /// Command from RX to TX.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum TxCommand {
     /// Configure transmission parameters.
@@ -86,7 +86,7 @@ pub enum TxCommand {
 }
 
 /// Response from TX to RX.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum TxResponse {
     /// Acknowledge a command.
@@ -105,7 +105,7 @@ pub enum TxResponse {
 /// Top-level ESPNOW message envelope.
 ///
 /// Every ESPNOW frame payload is a postcard-serialized `EspnowMessage`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum EspnowMessage {
     // Discovery
@@ -183,8 +183,6 @@ pub enum RxToPc {
 /// Maximum serialized message size (ESPNOW payload limit is 250 bytes).
 pub const MAX_MSG_SIZE: usize = 250;
 
-// TODO: Add a test that verifies that all the protocol messages are below that max msg size when serialized with postcard
-
 /// Serialize a message into a buffer. Returns the serialized slice.
 pub fn serialize<'a, T: Serialize>(
     msg: &T,
@@ -214,22 +212,26 @@ mod test {
 
     use crate::{PcToRx, RxToPc, MAX_MSG_SIZE};
 
+    /// Serialize `msg` into `buf` with postcard, then deserialize and assert equality.
+    /// Verifies that the message fits within MAX_MSG_SIZE and survives a round-trip.
+    fn test_ser_deser<'a, T: Deserialize<'a> + Serialize + PartialEq + Debug>(
+        msg: &T,
+        buf: &'a mut [u8; MAX_MSG_SIZE],
+    ) {
+        super::serialize(&msg, &mut buf[..]).expect("Serialization failed");
+        let msg_deser: T = super::deserialize(&buf[..]).expect("Deserialization failed");
+
+        assert_eq!(
+            &msg_deser, msg,
+            "Deserialized message should match the one that has been serialized"
+        )
+    }
+
     #[test]
     fn check_max_msg_size_postcard() {
-        fn test_ser_deser<'a, T: Deserialize<'a> + Serialize + PartialEq + Debug>(
-            msg: &T,
-            buf: &'a mut [u8; MAX_MSG_SIZE],
-        ) {
-            super::serialize(&msg, &mut buf[..]).expect("Serialization failed");
-            let msg_deser: T = super::deserialize(&buf[..]).expect("Deerialization failed");
-
-            assert_eq!(
-                &msg_deser, msg,
-                "Deserialized message should match the one that has been serialized"
-            )
-        }
         let mut buf = [0u8; MAX_MSG_SIZE];
 
+        // RxToPc variants
         test_ser_deser(
             &RxToPc::Status {
                 sweeping: true,
@@ -240,16 +242,111 @@ mod test {
         );
 
         test_ser_deser(
-            &RxToPc::Error { description: String::try_from("ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNOPQRSTUVWX").expect("Convert &str to heapless string") },
+            &RxToPc::Error {
+                description: String::try_from(
+                    "ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNOPQRSTUVWXYZ\
+                     ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNOPQRSTUVWXYZ\
+                     ABCDEFGHIJKLMNOPQRSTUVWX",
+                )
+                .expect("Convert &str to heapless string"),
+            },
             &mut buf,
         );
 
+        test_ser_deser(
+            &RxToPc::DataPoint {
+                angle_deg: 45.0,
+                rssi_dbm: -42.5,
+                sample_count: 10,
+            },
+            &mut buf,
+        );
+
+        test_ser_deser(&RxToPc::SweepComplete, &mut buf);
+
+        // PcToRx variants
         test_ser_deser(
             &PcToRx::StartSweep {
                 start_deg: 0.0,
                 stop_deg: 180.0,
                 step_deg: 10.0,
                 samples_per_angle: 100,
+            },
+            &mut buf,
+        );
+
+        test_ser_deser(
+            &PcToRx::ConfigureTx {
+                channel: 6,
+                tx_power_dbm: 20,
+                packet_rate_hz: 100,
+            },
+            &mut buf,
+        );
+
+        test_ser_deser(&PcToRx::Stop, &mut buf);
+
+        test_ser_deser(&PcToRx::QueryStatus, &mut buf);
+    }
+
+    /// Serialize with COBS, verify zero-delimiter, deserialize and check equality.
+    fn test_cobs_round_trip<T: Serialize + for<'a> Deserialize<'a> + PartialEq + Debug>(
+        msg: &T,
+        buf: &mut [u8; MAX_MSG_SIZE],
+    ) {
+        let len = super::serialize_cobs(msg, buf).expect("COBS serialize failed");
+        assert_eq!(buf[len - 1], 0x00, "COBS frame must end with zero byte");
+        let decoded: T =
+            postcard::from_bytes_cobs(&mut buf[..len]).expect("COBS deserialize failed");
+        assert_eq!(&decoded, msg);
+    }
+
+    #[test]
+    fn cobs_round_trip() {
+        let mut buf = [0u8; MAX_MSG_SIZE];
+
+        // PcToRx variants
+        test_cobs_round_trip(
+            &PcToRx::StartSweep {
+                start_deg: 0.0,
+                stop_deg: 360.0,
+                step_deg: 5.0,
+                samples_per_angle: 50,
+            },
+            &mut buf,
+        );
+        test_cobs_round_trip(
+            &PcToRx::ConfigureTx {
+                channel: 1,
+                tx_power_dbm: -10,
+                packet_rate_hz: 200,
+            },
+            &mut buf,
+        );
+        test_cobs_round_trip(&PcToRx::Stop, &mut buf);
+        test_cobs_round_trip(&PcToRx::QueryStatus, &mut buf);
+
+        // RxToPc variants
+        test_cobs_round_trip(
+            &RxToPc::DataPoint {
+                angle_deg: 90.0,
+                rssi_dbm: -30.0,
+                sample_count: 25,
+            },
+            &mut buf,
+        );
+        test_cobs_round_trip(&RxToPc::SweepComplete, &mut buf);
+        test_cobs_round_trip(
+            &RxToPc::Error {
+                description: String::try_from("test error").unwrap(),
+            },
+            &mut buf,
+        );
+        test_cobs_round_trip(
+            &RxToPc::Status {
+                sweeping: false,
+                tx_connected: true,
+                turntable_connected: false,
             },
             &mut buf,
         );

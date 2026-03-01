@@ -6,17 +6,21 @@ dev:
     #!/usr/bin/env bash
     cd frontend && pnpm run dev &
     VITE_PID=$!
-    cargo run -- --dev
+    cargo run --bin beambench-pc -- --dev
     kill $VITE_PID 2>/dev/null
 
 # Build for release: compile Svelte to static files, build Rust binary
 build:
     cd frontend && pnpm run build
-    cargo build --release
+    cargo build --bin beambench-pc --release
 
 # Run release build (serves embedded frontend)
 run:
     cargo run --release
+
+# Run RX simulator
+sim:
+    cargo run --bin rx-sim
 
 # Check Rust code only
 check:

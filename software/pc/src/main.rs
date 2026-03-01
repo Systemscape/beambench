@@ -82,7 +82,7 @@ async fn main() {
 }
 
 async fn list_ports() -> Json<Vec<String>> {
-    Json(beambench_pc::serial::list_ports())
+    Json(beambench_pc::serial::list_ports().await)
 }
 
 async fn get_data(State(state): State<Arc<AppState>>) -> Json<Vec<beambench_pc::DataPoint>> {
@@ -164,7 +164,12 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
         }
         WsCommand::Connect { port } => {
             let mut serial = state.serial.lock().await;
-            match beambench_pc::serial::SerialHandle::open(&port).await {
+            let result = if let Some(addr) = port.strip_prefix("tcp://") {
+                beambench_pc::serial::SerialHandle::open_tcp(addr).await
+            } else {
+                beambench_pc::serial::SerialHandle::open(&port).await
+            };
+            match result {
                 Ok(handle) => {
                     *serial = Some(handle);
                     let _ = state.ws_tx.send(WsEvent::Status(SystemStatus {
@@ -191,11 +196,36 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
         WsCommand::StartSweep(config) => {
             // Clear previous data.
             state.data.lock().await.clear();
-            // TODO: spawn sweep task using serial handle.
-            let _ = state.ws_tx.send(WsEvent::Error {
-                message: "Sweep not yet implemented".to_string(),
-            });
-            let _ = config; // suppress unused warning
+
+            let mut serial = state.serial.lock().await;
+            if let Some(ref mut handle) = *serial {
+                let serial_tx = handle.tx.clone();
+                let ws_tx = state.ws_tx.clone();
+                let state = state.clone();
+
+                // Take ownership of the rx channel for the sweep duration.
+                // We need a way to temporarily hand it to the sweep task.
+                // Swap it out with a dummy channel.
+                let (dummy_tx, dummy_rx) = tokio::sync::mpsc::channel(1);
+                let mut serial_rx = std::mem::replace(&mut handle.rx, dummy_rx);
+                drop(dummy_tx); // not needed
+
+                tokio::spawn(async move {
+                    let result =
+                        beambench_pc::sweep::run_sweep(config, &serial_tx, &mut serial_rx, &ws_tx)
+                            .await;
+                    if let Ok(data) = &result {
+                        let mut store = state.data.lock().await;
+                        *store = data.clone();
+                    }
+                    // Note: serial_rx is consumed by the sweep task.
+                    // A reconnect is needed for subsequent sweeps.
+                });
+            } else {
+                let _ = state.ws_tx.send(WsEvent::Error {
+                    message: "Not connected to serial/TCP".to_string(),
+                });
+            }
         }
         WsCommand::Stop => {
             let serial = state.serial.lock().await;
