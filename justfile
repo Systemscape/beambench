@@ -1,6 +1,9 @@
 # Beambench — top-level justfile
 # Delegates to per-crate justfiles in software/
 
+default:
+    just --list
+
 # Build all firmware crates
 build-firmware:
     just software/stepper/build

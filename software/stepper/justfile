@@ -1,5 +1,8 @@
 # Stepper (turntable motor controller) firmware
 
+default:
+    just --list
+    
 # Build firmware
 build:
     cargo build --release

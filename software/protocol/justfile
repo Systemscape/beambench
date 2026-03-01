@@ -1,5 +1,8 @@
 # Protocol crate — shared message types
 
+default:
+    just --list
+    
 # Check for host target
 check:
     cargo check
