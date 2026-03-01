@@ -124,7 +124,7 @@ pub enum EspnowMessage {
 // ── Serial protocol messages (PC ↔ RX) ──────────────────────────────────────
 
 /// Command from PC to RX board (over USB-serial).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum PcToRx {
     /// Start an antenna pattern sweep.
@@ -151,7 +151,7 @@ pub enum PcToRx {
 }
 
 /// Message from RX board to PC (over USB-serial).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum RxToPc {
     /// One measurement data point.
@@ -183,8 +183,13 @@ pub enum RxToPc {
 /// Maximum serialized message size (ESPNOW payload limit is 250 bytes).
 pub const MAX_MSG_SIZE: usize = 250;
 
+// TODO: Add a test that verifies that all the protocol messages are below that max msg size when serialized with postcard
+
 /// Serialize a message into a buffer. Returns the serialized slice.
-pub fn serialize<'a, T: Serialize>(msg: &T, buf: &'a mut [u8]) -> Result<&'a mut [u8], postcard::Error> {
+pub fn serialize<'a, T: Serialize>(
+    msg: &T,
+    buf: &'a mut [u8],
+) -> Result<&'a mut [u8], postcard::Error> {
     postcard::to_slice(msg, buf)
 }
 
@@ -198,4 +203,55 @@ pub fn deserialize<'a, T: Deserialize<'a>>(buf: &'a [u8]) -> Result<T, postcard:
 pub fn serialize_cobs<T: Serialize>(msg: &T, buf: &mut [u8]) -> Result<usize, postcard::Error> {
     let used = postcard::to_slice_cobs(msg, buf)?;
     Ok(used.len())
+}
+
+#[cfg(test)]
+mod test {
+    use core::fmt::Debug;
+
+    use heapless::String;
+    use serde::{Deserialize, Serialize};
+
+    use crate::{PcToRx, RxToPc, MAX_MSG_SIZE};
+
+    #[test]
+    fn check_max_msg_size_postcard() {
+        fn test_ser_deser<'a, T: Deserialize<'a> + Serialize + PartialEq + Debug>(
+            msg: &T,
+            buf: &'a mut [u8; MAX_MSG_SIZE],
+        ) {
+            super::serialize(&msg, &mut buf[..]).expect("Serialization failed");
+            let msg_deser: T = super::deserialize(&buf[..]).expect("Deerialization failed");
+
+            assert_eq!(
+                &msg_deser, msg,
+                "Deserialized message should match the one that has been serialized"
+            )
+        }
+        let mut buf = [0u8; MAX_MSG_SIZE];
+
+        test_ser_deser(
+            &RxToPc::Status {
+                sweeping: true,
+                tx_connected: true,
+                turntable_connected: true,
+            },
+            &mut buf,
+        );
+
+        test_ser_deser(
+            &RxToPc::Error { description: String::try_from("ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNOPQRSTUVWX").expect("Convert &str to heapless string") },
+            &mut buf,
+        );
+
+        test_ser_deser(
+            &PcToRx::StartSweep {
+                start_deg: 0.0,
+                stop_deg: 180.0,
+                step_deg: 10.0,
+                samples_per_angle: 100,
+            },
+            &mut buf,
+        );
+    }
 }
