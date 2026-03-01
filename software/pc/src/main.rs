@@ -1,6 +1,7 @@
 //! Beambench PC application — Axum server with WebSocket and embedded frontend.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use axum::{
     Router,
@@ -37,6 +38,7 @@ struct AppState {
     ws_tx: broadcast::Sender<WsEvent>,
     serial: Mutex<Option<beambench_pc::serial::SerialHandle>>,
     data: Mutex<Vec<beambench_pc::DataPoint>>,
+    sweeping: AtomicBool,
 }
 
 #[tokio::main]
@@ -56,6 +58,7 @@ async fn main() {
         ws_tx,
         serial: Mutex::new(None),
         data: Mutex::new(Vec::new()),
+        sweeping: AtomicBool::new(false),
     });
 
     let api = Router::new()
@@ -117,7 +120,7 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
         let serial = state.serial.lock().await;
         let data = state.data.lock().await;
         SystemStatus {
-            sweeping: false,
+            sweeping: state.sweeping.load(Ordering::SeqCst),
             tx_connected: false,
             turntable_connected: false,
             serial_connected: serial.is_some(),
@@ -194,34 +197,36 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
             }
         }
         WsCommand::StartSweep(config) => {
+            // Prevent concurrent sweeps.
+            if state.sweeping.swap(true, Ordering::SeqCst) {
+                let _ = state.ws_tx.send(WsEvent::Error {
+                    message: "Sweep already in progress".to_string(),
+                });
+                return;
+            }
+
             // Clear previous data.
             state.data.lock().await.clear();
 
-            let mut serial = state.serial.lock().await;
-            if let Some(ref mut handle) = *serial {
+            let serial = state.serial.lock().await;
+            if let Some(ref handle) = *serial {
                 let serial_tx = handle.tx.clone();
+                let serial_rx = handle.rx.clone();
                 let ws_tx = state.ws_tx.clone();
                 let state = state.clone();
 
-                // Take ownership of the rx channel for the sweep duration.
-                // We need a way to temporarily hand it to the sweep task.
-                // Swap it out with a dummy channel.
-                let (dummy_tx, dummy_rx) = tokio::sync::mpsc::channel(1);
-                let mut serial_rx = std::mem::replace(&mut handle.rx, dummy_rx);
-                drop(dummy_tx); // not needed
-
                 tokio::spawn(async move {
                     let result =
-                        beambench_pc::sweep::run_sweep(config, &serial_tx, &mut serial_rx, &ws_tx)
+                        beambench_pc::sweep::run_sweep(config, &serial_tx, &serial_rx, &ws_tx)
                             .await;
                     if let Ok(data) = &result {
                         let mut store = state.data.lock().await;
                         *store = data.clone();
                     }
-                    // Note: serial_rx is consumed by the sweep task.
-                    // A reconnect is needed for subsequent sweeps.
+                    state.sweeping.store(false, Ordering::SeqCst);
                 });
             } else {
+                state.sweeping.store(false, Ordering::SeqCst);
                 let _ = state.ws_tx.send(WsEvent::Error {
                     message: "Not connected to serial/TCP".to_string(),
                 });

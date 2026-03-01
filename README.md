@@ -1,41 +1,176 @@
+# Beambench — Automated Antenna Pattern Measurement
 
-## Setup
-Three ESP32-S3 modules connected via ESPNOW:
+Measures antenna radiation patterns by rotating the antenna under test on a turntable while recording RSSI at each angle. Produces polar plots.
 
-Motor Controller (#1): Drives the stepper motor, orchestrates the measurement sequence. Connected to PC via USB serial.
-Transmitter (#2): Sits on the turntable with the antenna under test. Battery-powered, no wires.
-Receiver (#3): Fixed position at a known distance. Receives packets from #2, measures RSSI. Connected to PC via USB serial.
+## Hardware Setup
 
-The PC coordinates the process: step the motor to an angle, trigger a burst of packets, collect RSSI, repeat. The result is a polar radiation pattern of the antenna under test.
+Three ESP32-C3-DevKit-RUST-1 boards connected via ESPNOW:
 
-        ┌───────────┐
-        │  ESP #2   │        ESPNOW         ┌───────────┐
-        │  TX       │                       │  ESP #3   │
-        │  (battery)│           ─ ─ ─ ─ ─ ► │  receiver │
-        │  + antenna│                       │           │
-        │  under    │                       └─────┬─────┘
-        │  test     │
-        └─────┬─────┘
-              │ sits on
-        ┌─────┴─────┐
-        │ turntable │
-        └─────╦─────┘
-              ║
-              ║
-              ║
-              ║
-        ┌─────╩─────┐
-        │  stepper  │
-        │  motor    │
-        └─────┬─────┘
-              ╫ wired
-              ╫
-        ┌─────┴─────┐         ESPNOW         ┌───────────┐
-        │  ESP #1   │                        │  ESP #3   │
-        │  motor    │  ◄ ─ ─ ─ ─ ─ ─ ─ ─ ─ ► │  receiver │
-        │  ctrl.    │                        │           │
-        └─────┬─────┘                        └─────┬─────┘
-              │ USB                                │ USB
-        ┌─────┴────────────────────────────────────┴─────┐
-        │                      PC                        │
-        └────────────────────────────────────────────────┘
+| Board | Role | Connection |
+|-------|------|------------|
+| Motor Controller | Drives stepper motor | Wired to motor + ESPNOW to RX |
+| Transmitter (TX) | Sits on turntable with antenna under test | Battery-powered, ESPNOW to RX |
+| Receiver (RX) | Fixed position, measures RSSI | USB-serial to PC + ESPNOW to both |
+
+```
+    ┌───────────┐
+    │  ESP #2   │        ESPNOW         ┌───────────┐
+    │  TX       │                       │  ESP #3   │
+    │  (battery)│           ─ ─ ─ ─ ─ ► │  receiver │
+    │  + antenna│                       │           │
+    │  under    │                       └─────┬─────┘
+    │  test     │
+    └─────┬─────┘
+          │ sits on
+    ┌─────┴─────┐
+    │ turntable │
+    └─────╦─────┘
+    ┌─────╩─────┐
+    │  stepper  │
+    │  motor    │
+    └─────┬─────┘
+          ╫ wired
+    ┌─────┴─────┐         ESPNOW         ┌───────────┐
+    │  ESP #1   │                        │  ESP #3   │
+    │  motor    │  ◄ ─ ─ ─ ─ ─ ─ ─ ─ ─ ► │  receiver │
+    │  ctrl.    │                        │           │
+    └─────┬─────┘                        └─────┬─────┘
+          │ USB                                │ USB
+    ┌─────┴────────────────────────────────────┴─────┐
+    │                      PC                        │
+    └────────────────────────────────────────────────┘
+```
+
+## Software Structure
+
+Separate crates (not a Cargo workspace — mixed host/embedded targets):
+
+```
+software/
+├── protocol/    Shared no_std message types (serde + postcard)
+├── stepper/     Turntable motor controller firmware (Embassy async + ESPNOW)
+├── tx/          TX beacon firmware
+├── rx/          RX coordinator firmware (ESPNOW + USB-serial bridge)
+└── pc/          PC app (Axum backend + Svelte frontend + Plotly.js polar plot)
+```
+
+Each crate has a `justfile`. The top-level `justfile` delegates.
+
+### Protocol Layers
+
+- **Serial (PC ↔ RX):** COBS-framed postcard over USB-serial or TCP
+- **ESPNOW (between boards):** postcard-serialized `EspnowMessage` payloads
+
+## Stepper Configuration
+
+The stepper firmware supports two motor backends, selected at compile time:
+
+| Feature | Motor | Interface |
+|---------|-------|-----------|
+| `step-dir` (default) | MKS SERVO42D/57D | GPIO step/dir/enable |
+| `servo42c` | MKS SERVO42C | UART (38400 baud) |
+
+### Motor Parameters
+
+- **Steps per revolution:** 3200 (200 full steps × 16 microsteps)
+- **Angular resolution:** ~0.1125°/step
+- **Step delay:** 200 µs (step-dir mode)
+- **ESPNOW channel:** 11
+
+The angle conversion math lives in `protocol::stepper` so it can be tested on the host. The stepper firmware imports it.
+
+### Wiring
+
+**Step/Dir Mode (MKS SERVO42D):**
+
+| ESP32-C3 | SERVO42D | Function |
+|----------|----------|----------|
+| 3.3V | COM | Common anode |
+| GPIO4 | STP | Step pulse |
+| GPIO5 | DIR | Direction |
+| GPIO6 | EN | Enable (active low) |
+| GND | GND | Ground |
+| — | V+ | 12–24V supply |
+
+**Servo42C Mode (MKS SERVO42C):**
+
+| ESP32-C3 | SERVO42C | Function |
+|----------|----------|----------|
+| GPIO4 | RX | UART receive |
+| GPIO5 | TX | UART transmit |
+| GND | GND | Ground |
+| — | V+ | 12–24V supply |
+
+### Build & Flash
+
+Requires nightly Rust and [probe-rs](https://probe.rs/).
+
+```sh
+cd software/stepper
+
+# Step/dir mode (default)
+cargo run
+
+# Servo42c mode
+cargo run --features servo42c --no-default-features
+```
+
+## PC App
+
+Axum backend with WebSocket control + Svelte SPA with Plotly.js polar plot.
+
+```sh
+cd software/pc
+
+# Development (backend + Vite dev server)
+just dev
+
+# Run the RX simulator (no hardware needed)
+just sim
+
+# Production build (embeds frontend in binary)
+just build
+```
+
+The PC app communicates with the RX board over USB-serial (COBS-framed postcard). For development without hardware, use the **rx-sim** TCP simulator which generates synthetic cardioid antenna patterns.
+
+Connect to the simulator via the UI by selecting `tcp://127.0.0.1:9876`.
+
+## Testing
+
+### Quick Reference
+
+```sh
+just test                              # all host-side tests
+cd software/protocol && cargo test     # protocol only
+cd software/pc && cargo test --lib     # PC unit tests only
+cd software/pc && cargo test --features sim  # unit + integration
+```
+
+### What's Tested
+
+**Protocol (12 tests):**
+- Postcard serialization round-trips for all `PcToRx` and `RxToPc` variants
+- COBS framing round-trips
+- `EspnowMessage` envelope round-trips (all discovery, turntable, TX variants)
+- Max-length error messages fit within `MAX_MSG_SIZE` (250 bytes, ESPNOW limit)
+- Stepper angle↔step conversion: zero, full/half revolution, negatives, fractional angles, truncation behavior
+
+**PC Unit Tests (17 tests):**
+- WebSocket JSON contract: `WsCommand`/`WsEvent` round-trips through `serde(tag = "type")` tagging
+- `SweepConfig` validation (zero step, reversed range, zero samples)
+- COBS serial framing: single frame decode, fragmented frame reassembly, multiple frames in one read
+- Sweep state machine: data collection, error propagation, disconnect handling, 30s timeout, subsequent sweeps reuse the serial channel
+- CSV export
+
+**Integration Tests (2 tests, requires `--features sim`):**
+- `full_sweep_via_tcp` — starts in-process rx-sim, connects via TCP, runs a sweep, verifies data points match the cardioid formula, checks CSV export
+- `sweep_stop_via_tcp` — starts a long sweep, sends abort, verifies clean cancellation
+
+### RX Simulator
+
+The `rx-sim` binary (and `sim` module) simulates the RX board over TCP. It implements the full COBS framing protocol and generates synthetic RSSI data using a cardioid pattern: `rssi = -30 + 20 * cos(angle - 45°)`.
+
+Used for:
+- Manual UI testing without hardware (`just sim`)
+- Automated integration tests (in-process, random port)

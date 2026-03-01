@@ -14,6 +14,11 @@ build-firmware:
 build-pc:
     just software/pc/build
 
+# Run all host-side tests (protocol + PC)
+test:
+    just software/protocol/test
+    just software/pc/test-all
+
 # Check all crates compile
 check:
     just software/protocol/check

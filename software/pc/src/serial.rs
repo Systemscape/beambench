@@ -1,8 +1,10 @@
 //! Serial communication with the RX board using postcard + COBS framing.
 
+use std::sync::Arc;
+
 use beambench_protocol::{PcToRx, RxToPc};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, mpsc};
 use tokio_serial::SerialPortBuilderExt;
 use tracing::{debug, error, info, warn};
 
@@ -12,7 +14,7 @@ const COBS_BUF_SIZE: usize = 512;
 /// Handle to a serial connection. Runs reader/writer tasks in the background.
 pub struct SerialHandle {
     pub tx: mpsc::Sender<PcToRx>,
-    pub rx: mpsc::Receiver<RxToPc>,
+    pub rx: Arc<Mutex<mpsc::Receiver<RxToPc>>>,
     cancel: tokio::sync::watch::Sender<bool>,
 }
 
@@ -33,7 +35,7 @@ impl SerialHandle {
 
         Ok(Self {
             tx: cmd_tx,
-            rx: resp_rx,
+            rx: Arc::new(Mutex::new(resp_rx)),
             cancel: cancel_tx,
         })
     }
@@ -54,7 +56,7 @@ impl SerialHandle {
 
         Ok(Self {
             tx: cmd_tx,
-            rx: resp_rx,
+            rx: Arc::new(Mutex::new(resp_rx)),
             cancel: cancel_tx,
         })
     }
@@ -169,4 +171,92 @@ pub async fn list_ports() -> Vec<String> {
     }
 
     ports
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use beambench_protocol::{MAX_MSG_SIZE, RxToPc};
+
+    /// Encode an RxToPc message as a COBS frame (ready to write to a stream).
+    fn encode_cobs_frame(msg: &RxToPc) -> Vec<u8> {
+        let mut buf = [0u8; MAX_MSG_SIZE];
+        let len = beambench_protocol::serialize_cobs(msg, &mut buf).unwrap();
+        buf[..len].to_vec()
+    }
+
+    #[tokio::test]
+    async fn reader_decodes_single_frame() {
+        let msg = RxToPc::SweepComplete;
+        let frame = encode_cobs_frame(&msg);
+
+        let (resp_tx, mut resp_rx) = mpsc::channel::<RxToPc>(16);
+        let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+
+        // DuplexStream: write to `writer`, reader_task reads from `reader`
+        let (mut writer, reader) = tokio::io::duplex(1024);
+
+        tokio::spawn(reader_task(reader, resp_tx, cancel_rx));
+
+        writer.write_all(&frame).await.unwrap();
+        drop(writer); // EOF signals reader to stop
+
+        let decoded = resp_rx.recv().await.expect("should receive decoded message");
+        assert_eq!(decoded, msg);
+    }
+
+    #[tokio::test]
+    async fn reader_handles_fragmented_frames() {
+        let msg = RxToPc::DataPoint {
+            angle_deg: 45.0,
+            rssi_dbm: -30.0,
+            sample_count: 10,
+        };
+        let frame = encode_cobs_frame(&msg);
+        assert!(frame.len() > 2, "frame should be long enough to split");
+
+        let (resp_tx, mut resp_rx) = mpsc::channel::<RxToPc>(16);
+        let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+
+        let (mut writer, reader) = tokio::io::duplex(1024);
+
+        tokio::spawn(reader_task(reader, resp_tx, cancel_rx));
+
+        // Write frame in two fragments
+        let mid = frame.len() / 2;
+        writer.write_all(&frame[..mid]).await.unwrap();
+        tokio::task::yield_now().await;
+        writer.write_all(&frame[mid..]).await.unwrap();
+        drop(writer);
+
+        let decoded = resp_rx.recv().await.expect("should reassemble fragmented frame");
+        assert_eq!(decoded, msg);
+    }
+
+    #[tokio::test]
+    async fn reader_handles_multiple_frames_in_one_read() {
+        let msg1 = RxToPc::SweepComplete;
+        let msg2 = RxToPc::DataPoint {
+            angle_deg: 90.0,
+            rssi_dbm: -50.0,
+            sample_count: 5,
+        };
+        let mut combined = encode_cobs_frame(&msg1);
+        combined.extend_from_slice(&encode_cobs_frame(&msg2));
+
+        let (resp_tx, mut resp_rx) = mpsc::channel::<RxToPc>(16);
+        let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+
+        let (mut writer, reader) = tokio::io::duplex(1024);
+
+        tokio::spawn(reader_task(reader, resp_tx, cancel_rx));
+
+        writer.write_all(&combined).await.unwrap();
+        drop(writer);
+
+        let decoded1 = resp_rx.recv().await.expect("should decode first frame");
+        let decoded2 = resp_rx.recv().await.expect("should decode second frame");
+        assert_eq!(decoded1, msg1);
+        assert_eq!(decoded2, msg2);
+    }
 }

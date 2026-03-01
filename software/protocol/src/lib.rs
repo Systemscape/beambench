@@ -178,6 +178,23 @@ pub enum RxToPc {
     },
 }
 
+// ── Stepper angle conversion (pure math, testable on host) ──────────────────
+
+pub mod stepper {
+    /// Steps per revolution: 200 full steps × 16 microsteps.
+    pub const STEPS_PER_REV: f32 = 200.0 * 16.0;
+
+    /// Convert an angle in degrees to stepper motor steps.
+    pub fn degrees_to_steps(angle_deg: f32) -> i32 {
+        (angle_deg / 360.0 * STEPS_PER_REV) as i32
+    }
+
+    /// Convert stepper motor steps to an angle in degrees.
+    pub fn steps_to_degrees(steps: i32) -> f32 {
+        (steps as f32) / STEPS_PER_REV * 360.0
+    }
+}
+
 // ── Serialization helpers ───────────────────────────────────────────────────
 
 /// Maximum serialized message size (ESPNOW payload limit is 250 bytes).
@@ -210,7 +227,10 @@ mod test {
     use heapless::String;
     use serde::{Deserialize, Serialize};
 
-    use crate::{PcToRx, RxToPc, MAX_MSG_SIZE};
+    use crate::{
+        EspnowMessage, HelloBeacon, PairConfirm, PcToRx, Role, RxToPc, TurntableCommand,
+        TurntableResponse, TxCommand, TxResponse, MAX_MSG_SIZE,
+    };
 
     /// Serialize `msg` into `buf` with postcard, then deserialize and assert equality.
     /// Verifies that the message fits within MAX_MSG_SIZE and survives a round-trip.
@@ -350,5 +370,149 @@ mod test {
             },
             &mut buf,
         );
+    }
+
+    #[test]
+    fn espnow_message_round_trip() {
+        let mut buf = [0u8; MAX_MSG_SIZE];
+
+        // Discovery
+        test_ser_deser(
+            &EspnowMessage::Hello(HelloBeacon {
+                role: Role::Tx,
+                mac: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+            }),
+            &mut buf,
+        );
+        test_ser_deser(
+            &EspnowMessage::PairConfirm(PairConfirm {
+                role: Role::Turntable,
+                mac: [1, 2, 3, 4, 5, 6],
+            }),
+            &mut buf,
+        );
+
+        // Turntable commands/responses
+        test_ser_deser(
+            &EspnowMessage::TurntableCmd(TurntableCommand::MoveTo { angle_deg: 180.0 }),
+            &mut buf,
+        );
+        test_ser_deser(
+            &EspnowMessage::TurntableCmd(TurntableCommand::Stop),
+            &mut buf,
+        );
+        test_ser_deser(
+            &EspnowMessage::TurntableResp(TurntableResponse::MoveComplete { angle_deg: 90.0 }),
+            &mut buf,
+        );
+        test_ser_deser(
+            &EspnowMessage::TurntableResp(TurntableResponse::Error {
+                description: String::try_from("motor stall detected").unwrap(),
+            }),
+            &mut buf,
+        );
+
+        // TX commands/responses
+        test_ser_deser(
+            &EspnowMessage::TxCmd(TxCommand::Configure {
+                channel: 6,
+                tx_power_dbm: 20,
+                packet_rate_hz: 100,
+            }),
+            &mut buf,
+        );
+        test_ser_deser(
+            &EspnowMessage::TxCmd(TxCommand::StartTransmit),
+            &mut buf,
+        );
+        test_ser_deser(
+            &EspnowMessage::TxCmd(TxCommand::StopTransmit),
+            &mut buf,
+        );
+        test_ser_deser(&EspnowMessage::TxResp(TxResponse::Ack), &mut buf);
+        test_ser_deser(
+            &EspnowMessage::TxResp(TxResponse::Status {
+                transmitting: true,
+                channel: 11,
+                tx_power_dbm: -5,
+                packet_rate_hz: 200,
+            }),
+            &mut buf,
+        );
+    }
+
+    #[test]
+    fn max_length_turntable_error_fits() {
+        let mut buf = [0u8; MAX_MSG_SIZE];
+        // 64-char description (max capacity of String<64>)
+        let desc = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        assert_eq!(desc.len(), 64);
+        test_ser_deser(
+            &EspnowMessage::TurntableResp(TurntableResponse::Error {
+                description: String::try_from(desc).unwrap(),
+            }),
+            &mut buf,
+        );
+    }
+
+    // ── Stepper angle conversion tests ──────────────────────────────────────
+
+    mod stepper_tests {
+        use crate::stepper::*;
+
+        #[test]
+        fn zero_degrees_is_zero_steps() {
+            assert_eq!(degrees_to_steps(0.0), 0);
+        }
+
+        #[test]
+        fn full_revolution() {
+            assert_eq!(degrees_to_steps(360.0), 3200);
+        }
+
+        #[test]
+        fn half_revolution() {
+            assert_eq!(degrees_to_steps(180.0), 1600);
+        }
+
+        #[test]
+        fn negative_angle() {
+            assert_eq!(degrees_to_steps(-90.0), -800);
+        }
+
+        #[test]
+        fn round_trip_cardinal_angles() {
+            for angle in [0.0_f32, 45.0, 90.0, 180.0, 270.0, 360.0] {
+                let steps = degrees_to_steps(angle);
+                let recovered = steps_to_degrees(steps);
+                assert!(
+                    (recovered - angle).abs() < 0.12,
+                    "round-trip for {angle}°: got {recovered}°"
+                );
+            }
+        }
+
+        #[test]
+        fn round_trip_fractional_angles() {
+            // Resolution is 360/3200 ≈ 0.1125°/step
+            let angle = 33.75; // exactly 300 steps
+            let steps = degrees_to_steps(angle);
+            assert_eq!(steps, 300);
+            let recovered = steps_to_degrees(steps);
+            assert!((recovered - angle).abs() < 0.001);
+        }
+
+        #[test]
+        fn truncation_behavior() {
+            // 0.05° → 0.05/360*3200 = 0.444 → truncates to 0
+            assert_eq!(degrees_to_steps(0.05), 0);
+            // 0.12° → 0.12/360*3200 = 1.067 → truncates to 1
+            assert_eq!(degrees_to_steps(0.12), 1);
+        }
+
+        #[test]
+        fn steps_per_rev_value() {
+            assert_eq!(STEPS_PER_REV, 3200.0);
+        }
     }
 }

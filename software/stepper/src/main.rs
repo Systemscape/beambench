@@ -59,9 +59,6 @@ macro_rules! mk_static {
 const DEFAULT_CHANNEL: u8 = 11;
 const BEACON_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Steps per revolution (motor-specific, including microstepping).
-const STEPS_PER_REV: f32 = 200.0 * 16.0; // 200 full steps × 16 microsteps
-
 /// Default step delay in microseconds for step-dir mode.
 #[cfg(feature = "step-dir")]
 const DEFAULT_STEP_DELAY_US: u32 = 200;
@@ -80,15 +77,8 @@ enum MotorResult {
     Error { msg: &'static str },
 }
 
-// ── Conversion helpers ───────────────────────────────────────────────────────
-
-fn degrees_to_steps(angle_deg: f32) -> i32 {
-    (angle_deg / 360.0 * STEPS_PER_REV) as i32
-}
-
-fn steps_to_degrees(steps: i32) -> f32 {
-    (steps as f32) / STEPS_PER_REV * 360.0
-}
+// Re-export stepper math from protocol crate.
+use beambench_protocol::stepper::{degrees_to_steps, steps_to_degrees};
 
 // ── Entry point ──────────────────────────────────────────────────────────────
 
