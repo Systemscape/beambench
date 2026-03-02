@@ -45,6 +45,13 @@ pub struct SystemStatus {
     pub data_points: usize,
 }
 
+/// Serial port information returned by the list_ports endpoint.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PortInfo {
+    pub name: String,
+    pub description: String,
+}
+
 /// Events pushed to the frontend over WebSocket.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -53,6 +60,7 @@ pub enum WsEvent {
     SweepComplete,
     Status(SystemStatus),
     Error { message: String },
+    Log { message: String },
 }
 
 /// Commands received from the frontend over WebSocket.
@@ -165,6 +173,9 @@ mod tests {
         json_round_trip(&WsEvent::SweepComplete);
         json_round_trip(&WsEvent::Error {
             message: "test error".to_string(),
+        });
+        json_round_trip(&WsEvent::Log {
+            message: "Connected to /dev/ttyUSB0".to_string(),
         });
         json_round_trip(&WsEvent::DataPoint(DataPoint {
             angle_deg: 45.0,

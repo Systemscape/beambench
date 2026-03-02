@@ -17,7 +17,7 @@ use rust_embed::Embed;
 use tokio::sync::{Mutex, broadcast};
 use tracing::info;
 
-use beambench_pc::{SystemStatus, WsCommand, WsEvent, export_csv};
+use beambench_pc::{PortInfo, SystemStatus, WsCommand, WsEvent, export_csv};
 
 #[derive(Parser)]
 struct Args {
@@ -84,7 +84,7 @@ async fn main() {
     axum::serve(listener, app).await.unwrap();
 }
 
-async fn list_ports() -> Json<Vec<String>> {
+async fn list_ports() -> Json<Vec<PortInfo>> {
     Json(beambench_pc::serial::list_ports().await)
 }
 
@@ -200,8 +200,14 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
             };
             match result {
                 Ok(handle) => {
+                    let serial_tx = handle.tx.clone();
+                    let serial_rx = handle.rx.clone();
                     *serial = Some(handle);
+                    drop(serial); // Release lock before spawning verification.
                     info!("Serial connected to {}", port);
+                    let _ = state.ws_tx.send(WsEvent::Log {
+                        message: format!("Connected to {}, verifying device...", port),
+                    });
                     let _ = state.ws_tx.send(WsEvent::Status(SystemStatus {
                         sweeping: false,
                         tx_connected: false,
@@ -209,9 +215,70 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
                         serial_connected: true,
                         data_points: state.data.lock().await.len(),
                     }));
+
+                    // Probe the device: send QueryStatus and wait for a response.
+                    let ws_tx = state.ws_tx.clone();
+                    let port_name = port.clone();
+                    tokio::spawn(async move {
+                        // Give the device a moment to be ready.
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        let _ = serial_tx.send(beambench_protocol::PcToRx::QueryStatus).await;
+
+                        let result = tokio::time::timeout(
+                            std::time::Duration::from_secs(2),
+                            async {
+                                let mut rx = serial_rx.lock().await;
+                                rx.recv().await
+                            },
+                        )
+                        .await;
+
+                        match result {
+                            Ok(Some(beambench_protocol::RxToPc::Status { tx_connected, turntable_connected, .. })) => {
+                                tracing::info!("Device verified as RX board");
+                                let _ = ws_tx.send(WsEvent::Log {
+                                    message: format!("{} confirmed as RX board (TX: {}, Turntable: {})",
+                                        port_name,
+                                        if tx_connected { "connected" } else { "not found" },
+                                        if turntable_connected { "connected" } else { "not found" }),
+                                });
+                                let _ = ws_tx.send(WsEvent::Status(SystemStatus {
+                                    sweeping: false,
+                                    tx_connected,
+                                    turntable_connected,
+                                    serial_connected: true,
+                                    data_points: 0,
+                                }));
+                            }
+                            Ok(Some(other)) => {
+                                tracing::info!("Unexpected response from device: {:?}", other);
+                                let _ = ws_tx.send(WsEvent::Log {
+                                    message: format!("{}: got unexpected response — may not be RX board", port_name),
+                                });
+                            }
+                            Ok(None) => {
+                                tracing::warn!("Serial channel closed during verification");
+                                let _ = ws_tx.send(WsEvent::Log {
+                                    message: format!("{}: connection lost during verification", port_name),
+                                });
+                            }
+                            Err(_) => {
+                                tracing::warn!("No response from {} — not an RX board or firmware not running", port_name);
+                                let _ = ws_tx.send(WsEvent::Log {
+                                    message: format!("{}: no response — this is probably not the RX board", port_name),
+                                });
+                                let _ = ws_tx.send(WsEvent::Error {
+                                    message: "Device did not respond. Is this the RX board?".to_string(),
+                                });
+                            }
+                        }
+                    });
                 }
                 Err(e) => {
                     info!("Failed to connect to {}: {}", port, e);
+                    let _ = state.ws_tx.send(WsEvent::Log {
+                        message: format!("Failed to connect to {}: {}", port, e),
+                    });
                     let _ = state.ws_tx.send(WsEvent::Error {
                         message: format!("Failed to open {}: {}", port, e),
                     });
@@ -224,6 +291,9 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
                 info!("Disconnecting serial");
                 handle.close();
             }
+            let _ = state.ws_tx.send(WsEvent::Log {
+                message: "Disconnected".to_string(),
+            });
             let _ = state.ws_tx.send(WsEvent::Status(SystemStatus {
                 sweeping: false,
                 tx_connected: false,
@@ -251,18 +321,38 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
                 let ws_tx = state.ws_tx.clone();
                 let state = state.clone();
 
+                let _ = ws_tx.send(WsEvent::Log {
+                    message: format!(
+                        "Sweep started: {}° to {}° (step {}°, {} samples)",
+                        config.start_deg, config.stop_deg, config.step_deg, config.samples_per_angle
+                    ),
+                });
+
                 tokio::spawn(async move {
                     let result =
                         beambench_pc::sweep::run_sweep(config, &serial_tx, &serial_rx, &ws_tx)
                             .await;
-                    if let Ok(data) = &result {
-                        let mut store = state.data.lock().await;
-                        *store = data.clone();
+                    match &result {
+                        Ok(data) => {
+                            let _ = ws_tx.send(WsEvent::Log {
+                                message: format!("Sweep complete: {} data points", data.len()),
+                            });
+                            let mut store = state.data.lock().await;
+                            *store = data.clone();
+                        }
+                        Err(e) => {
+                            let _ = ws_tx.send(WsEvent::Log {
+                                message: format!("Sweep failed: {}", e),
+                            });
+                        }
                     }
                     state.sweeping.store(false, Ordering::SeqCst);
                 });
             } else {
                 state.sweeping.store(false, Ordering::SeqCst);
+                let _ = state.ws_tx.send(WsEvent::Log {
+                    message: "Sweep failed: not connected".to_string(),
+                });
                 let _ = state.ws_tx.send(WsEvent::Error {
                     message: "Not connected to serial/TCP".to_string(),
                 });

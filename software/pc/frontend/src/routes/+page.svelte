@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
-	import { createWsConnection, type DataPoint, type SystemStatus, type WsEvent } from '$lib/ws';
+	import { createWsConnection, type DataPoint, type PortInfo, type SystemStatus, type WsEvent } from '$lib/ws';
 
 	let plotDiv: HTMLDivElement;
 	let Plotly: typeof import('plotly.js-dist-min');
@@ -13,10 +13,12 @@
 		serial_connected: false,
 		data_points: 0
 	});
-	let ports: string[] = $state([]);
+	let ports: PortInfo[] = $state([]);
 	let selectedPort = $state('');
 	let connected = $state(false);
 	let errorMessage = $state('');
+	let logEntries: { ts: string; msg: string }[] = $state([]);
+	let logDiv: HTMLDivElement;
 
 	// Sweep config
 	let startDeg = $state(0);
@@ -25,6 +27,18 @@
 	let samplesPerAngle = $state(10);
 
 	let ws: ReturnType<typeof createWsConnection> | null = null;
+
+	function addLog(msg: string) {
+		const ts = new Date().toLocaleTimeString();
+		logEntries = [...logEntries, { ts, msg }];
+		if (logEntries.length > 200) {
+			logEntries = logEntries.slice(-200);
+		}
+		// Auto-scroll to bottom
+		requestAnimationFrame(() => {
+			if (logDiv) logDiv.scrollTop = logDiv.scrollHeight;
+		});
+	}
 
 	function handleEvent(event: WsEvent) {
 		switch (event.type) {
@@ -41,6 +55,7 @@
 				break;
 			case 'SweepComplete':
 				status = { ...status, sweeping: false };
+				addLog('Sweep complete');
 				break;
 			case 'Status':
 				status = {
@@ -53,9 +68,13 @@
 				break;
 			case 'Error':
 				errorMessage = event.message;
+				addLog(`Error: ${event.message}`);
 				setTimeout(() => {
 					errorMessage = '';
 				}, 5000);
+				break;
+			case 'Log':
+				addLog(event.message);
 				break;
 		}
 	}
@@ -111,7 +130,7 @@
 			const res = await fetch('/api/ports');
 			ports = await res.json();
 			if (ports.length > 0 && !selectedPort) {
-				selectedPort = ports[0];
+				selectedPort = ports[0].name;
 			}
 		} catch {
 			errorMessage = 'Failed to fetch serial ports';
@@ -180,7 +199,9 @@
 					<div class="field">
 						<select id="port" bind:value={selectedPort}>
 							{#each ports as port}
-								<option value={port}>{port}</option>
+								<option value={port.name}>
+								{port.name}{port.description ? ` \u2014 ${port.description}` : ''}
+							</option>
 							{/each}
 						</select>
 					</div>
@@ -243,6 +264,15 @@
 				<a href="/api/export/csv" download="beambench.csv">
 					<button disabled={dataPoints.length === 0}>Download CSV</button>
 				</a>
+			</section>
+
+			<section class="log-section">
+				<h2>Log</h2>
+				<div class="log" bind:this={logDiv}>
+					{#each logEntries as entry}
+						<div class="log-entry"><span class="log-ts">{entry.ts}</span> {entry.msg}</div>
+					{/each}
+				</div>
 			</section>
 		</div>
 
@@ -425,5 +455,32 @@
 
 	a {
 		text-decoration: none;
+	}
+
+	.log-section {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		min-height: 0;
+	}
+
+	.log {
+		flex: 1;
+		overflow-y: auto;
+		font-family: monospace;
+		font-size: 0.75rem;
+		line-height: 1.5;
+		color: #999;
+		min-height: 80px;
+		max-height: 200px;
+	}
+
+	.log-entry {
+		white-space: pre-wrap;
+		word-break: break-word;
+	}
+
+	.log-ts {
+		color: #555;
 	}
 </style>

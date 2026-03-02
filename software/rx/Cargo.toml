@@ -52,6 +52,7 @@ rtt-target = { version = "0.6.2", features = ["defmt"] }
 beambench-protocol = { path = "../protocol", features = ["defmt"] }
 postcard = { version = "1", features = ["experimental-derive"] }
 embedded-io = "0.7.1"
+embedded-io-async = "0.7"
 heapless = "0.9.2"
 
 # SK6812 LED driver via RMT peripheral

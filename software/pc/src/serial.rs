@@ -150,13 +150,37 @@ async fn reader_task<R: AsyncReadExt + Unpin>(
 /// Default address for the rx-sim simulator.
 const SIM_ADDR: &str = "127.0.0.1:9876";
 
-/// List available serial ports. Also probes the default rx-sim TCP address
-/// and includes it if reachable.
-pub async fn list_ports() -> Vec<String> {
-    let mut ports: Vec<String> = tokio_serial::available_ports()
+/// List available serial ports with descriptions. Also probes the default
+/// rx-sim TCP address and includes it if reachable.
+pub async fn list_ports() -> Vec<crate::PortInfo> {
+    let mut ports: Vec<crate::PortInfo> = tokio_serial::available_ports()
         .unwrap_or_default()
         .into_iter()
-        .map(|p| p.port_name)
+        .map(|p| {
+            let description = match &p.port_type {
+                tokio_serial::SerialPortType::UsbPort(usb) => {
+                    let mut parts = Vec::new();
+                    if let Some(product) = &usb.product {
+                        parts.push(product.clone());
+                    } else if let Some(manufacturer) = &usb.manufacturer {
+                        parts.push(manufacturer.clone());
+                    } else {
+                        parts.push(format!("USB {:04x}:{:04x}", usb.vid, usb.pid));
+                    }
+                    if let Some(sn) = &usb.serial_number {
+                        parts.push(format!("[{}]", sn));
+                    }
+                    parts.join(" ")
+                }
+                tokio_serial::SerialPortType::BluetoothPort => "Bluetooth".to_string(),
+                tokio_serial::SerialPortType::PciPort => "PCI".to_string(),
+                _ => String::new(),
+            };
+            crate::PortInfo {
+                name: p.port_name,
+                description,
+            }
+        })
         .collect();
 
     // Quick probe: can we connect to the simulator?
@@ -167,7 +191,13 @@ pub async fn list_ports() -> Vec<String> {
     .await
     .is_ok_and(|r| r.is_ok())
     {
-        ports.insert(0, format!("tcp://{}", SIM_ADDR));
+        ports.insert(
+            0,
+            crate::PortInfo {
+                name: format!("tcp://{}", SIM_ADDR),
+                description: "RX Simulator".to_string(),
+            },
+        );
     }
 
     ports

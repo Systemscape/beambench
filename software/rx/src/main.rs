@@ -10,13 +10,17 @@
 
 use defmt::info;
 use embassy_executor::Spawner;
-use embassy_sync::{blocking_mutex::raw::NoopRawMutex, mutex::Mutex, signal::Signal};
+use embassy_sync::{blocking_mutex::raw::NoopRawMutex, channel::Channel, mutex::Mutex, signal::Signal};
+use embassy_futures::select::{Either, select};
 use embassy_time::{Duration, Timer};
+use embedded_io_async::{Read, Write};
 use esp_alloc as _;
 use esp_backtrace as _;
 use esp_hal::{
     clock::CpuClock, interrupt::software::SoftwareInterruptControl, rmt::Rmt, time::Rate,
     timer::timg::TimerGroup,
+    usb_serial_jtag::{UsbSerialJtagRx, UsbSerialJtagTx, UsbSerialJtag},
+    Async,
 };
 use esp_hal_smartled::{buffer_size, color_order, RmtSmartLeds, Sk68xxTiming};
 use esp_radio::esp_now::{
@@ -24,7 +28,7 @@ use esp_radio::esp_now::{
 };
 use smart_leds::{SmartLedsWrite, RGB8};
 
-use beambench_protocol::{self as proto, EspnowMessage, Role};
+use beambench_protocol::{self as proto, EspnowMessage, PcToRx, RxToPc, Role};
 
 #[defmt::panic_handler]
 fn defmt_panic() -> ! {
@@ -69,6 +73,18 @@ impl RxState {
         self.tx_paired && self.turntable_paired
     }
 }
+
+/// LED state for the led_task.
+#[derive(Clone, Copy)]
+enum LedState {
+    Solid(RGB8),
+    Blink { color: RGB8, period_ms: u64 },
+}
+
+const COLOR_BLUE: RGB8 = RGB8 { r: 0, g: 0, b: 255 };
+const COLOR_GREEN: RGB8 = RGB8 { r: 0, g: 255, b: 0 };
+const COLOR_AMBER: RGB8 = RGB8 { r: 255, g: 80, b: 0 };
+const COLOR_OFF: RGB8 = RGB8 { r: 0, g: 0, b: 0 };
 
 // ── Entry point ──────────────────────────────────────────────────────────────
 
@@ -115,7 +131,19 @@ async fn main(spawner: Spawner) -> ! {
         .unwrap();
 
     // Blue = alive, booting.
-    let _ = led.write(core::iter::once(RGB8 { r: 0, g: 0, b: 255 }));
+    let _ = led.write(core::iter::once(COLOR_BLUE));
+
+    let led_signal = mk_static!(Signal<NoopRawMutex, LedState>, Signal::new());
+
+    // ── USB-Serial-JTAG setup ────────────────────────────────────────────────
+
+    let usb_serial = UsbSerialJtag::new(peripherals.USB_DEVICE).into_async();
+    let (usb_rx, usb_tx) = usb_serial.split();
+    let usb_rx = mk_static!(UsbSerialJtagRx<'static, Async>, usb_rx);
+    let usb_tx = mk_static!(Mutex::<NoopRawMutex, UsbSerialJtagTx<'static, Async>>, Mutex::new(usb_tx));
+
+    // Channel for RxToPc responses (serial_rx_task and main loop produce, serial_tx_task consumes).
+    let serial_resp_ch = mk_static!(Channel::<NoopRawMutex, RxToPc, 8>, Channel::new());
 
     let (manager, sender, receiver) = esp_now.split();
     let manager = mk_static!(EspNowManager<'static>, manager);
@@ -131,8 +159,10 @@ async fn main(spawner: Spawner) -> ! {
 
     spawner.spawn(discovery_task(sender, state)).ok();
     spawner
-        .spawn(listener_task(manager, sender, receiver, state, rssi_signal))
+        .spawn(listener_task(manager, sender, receiver, state, rssi_signal, led_signal))
         .ok();
+    spawner.spawn(serial_rx_task(usb_rx, state, serial_resp_ch.sender())).ok();
+    spawner.spawn(serial_tx_task(usb_tx, serial_resp_ch.receiver())).ok();
 
     info!("RX coordinator ready, discovering peers...");
 
@@ -145,15 +175,34 @@ async fn main(spawner: Spawner) -> ! {
         Timer::after(Duration::from_millis(500)).await;
     }
 
-    // Green = connected to both TX and turntable.
-    let _ = led.write(core::iter::once(RGB8 { r: 0, g: 255, b: 0 }));
-
-    // Main loop: await commands from PC over serial.
-    // TODO: Implement USB-serial bridge with postcard+COBS.
-    // For now, just log RSSI from received TX packets.
+    // Main loop: drive LED state machine + log RSSI.
+    let mut led_state = LedState::Solid(COLOR_GREEN);
     loop {
-        let rssi = rssi_signal.wait().await;
-        info!("RSSI: {} dBm", rssi);
+        match led_state {
+            LedState::Solid(color) => {
+                let _ = led.write(core::iter::once(color));
+                // Wait for either LED state change or RSSI reading.
+                match select(led_signal.wait(), rssi_signal.wait()).await {
+                    Either::First(new) => { led_state = new; }
+                    Either::Second(rssi) => { info!("RSSI: {} dBm", rssi); }
+                }
+            }
+            LedState::Blink { color, period_ms } => {
+                let half = Duration::from_millis(period_ms / 2);
+                loop {
+                    let _ = led.write(core::iter::once(color));
+                    match select(led_signal.wait(), Timer::after(half)).await {
+                        Either::First(new) => { led_state = new; break; }
+                        Either::Second(_) => {}
+                    }
+                    let _ = led.write(core::iter::once(COLOR_OFF));
+                    match select(led_signal.wait(), Timer::after(half)).await {
+                        Either::First(new) => { led_state = new; break; }
+                        Either::Second(_) => {}
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -195,9 +244,32 @@ async fn listener_task(
     mut receiver: EspNowReceiver<'static>,
     state: &'static Mutex<NoopRawMutex, RxState>,
     rssi_signal: &'static Signal<NoopRawMutex, i32>,
+    led_signal: &'static Signal<NoopRawMutex, LedState>,
 ) {
+    let mut activity_active = false;
+    let mut last_rssi_tick: u64 = 0;
+
     loop {
-        let received = receiver.receive_async().await;
+        // If activity LED is on, check for timeout (2 seconds without RSSI).
+        let received = if activity_active {
+            match select(
+                receiver.receive_async(),
+                Timer::after(Duration::from_secs(2)),
+            )
+            .await
+            {
+                Either::First(r) => r,
+                Either::Second(_) => {
+                    // No RSSI for 2s — go back to green.
+                    activity_active = false;
+                    led_signal.signal(LedState::Solid(COLOR_GREEN));
+                    continue;
+                }
+            }
+        } else {
+            receiver.receive_async().await
+        };
+
         let data = received.data();
         let src = received.info.src_address;
         let rssi = received.info.rx_control.rssi;
@@ -225,6 +297,14 @@ async fn listener_task(
                 };
                 if is_tx {
                     rssi_signal.signal(rssi);
+
+                    // Start blinking on first RSSI packet.
+                    let now = embassy_time::Instant::now().as_millis();
+                    if !activity_active || now - last_rssi_tick > 1000 {
+                        led_signal.signal(LedState::Blink { color: COLOR_AMBER, period_ms: 200 });
+                        activity_active = true;
+                    }
+                    last_rssi_tick = now;
                 }
             }
         }
@@ -293,5 +373,111 @@ async fn handle_hello(
         let mut s = sender.lock().await;
         let _ = s.send_async(src, data).await;
         info!("Sent PairConfirm to {:?}", hello.role);
+    }
+}
+
+// ── USB-Serial Tasks ────────────────────────────────────────────────────────
+
+const COBS_BUF_SIZE: usize = 512;
+
+/// Reads COBS-framed PcToRx commands from USB-Serial-JTAG and dispatches them.
+#[embassy_executor::task]
+async fn serial_rx_task(
+    usb_rx: &'static mut UsbSerialJtagRx<'static, Async>,
+    state: &'static Mutex<NoopRawMutex, RxState>,
+    resp_tx: embassy_sync::channel::Sender<'static, NoopRawMutex, RxToPc, 8>,
+) {
+    let mut raw_buf = [0u8; 64];
+    let mut accum: heapless::Vec<u8, COBS_BUF_SIZE> = heapless::Vec::new();
+
+    loop {
+        let n = match usb_rx.read(&mut raw_buf).await {
+            Ok(n) if n > 0 => n,
+            Ok(_) => continue,
+            Err(_) => {
+                Timer::after(Duration::from_millis(100)).await;
+                continue;
+            }
+        };
+
+        for &byte in &raw_buf[..n] {
+            if byte == 0x00 {
+                // End of COBS frame.
+                if accum.len() > 0 {
+                    let mut frame_buf = [0u8; COBS_BUF_SIZE];
+                    let len = accum.len();
+                    frame_buf[..len].copy_from_slice(&accum);
+                    // postcard::from_bytes_cobs needs a mutable slice with the trailing 0x00
+                    frame_buf[len] = 0x00;
+                    match postcard::from_bytes_cobs::<PcToRx>(&mut frame_buf[..len + 1]) {
+                        Ok(cmd) => {
+                            info!("Serial cmd: {:?}", defmt::Debug2Format(&cmd));
+                            handle_serial_cmd(cmd, state, &resp_tx).await;
+                        }
+                        Err(_) => {
+                            info!("Failed to decode serial COBS frame ({} bytes)", len);
+                        }
+                    }
+                }
+                accum.clear();
+            } else if accum.push(byte).is_err() {
+                // Overflow — discard frame.
+                info!("Serial RX buffer overflow, discarding");
+                accum.clear();
+            }
+        }
+    }
+}
+
+/// Handles a decoded PcToRx command.
+async fn handle_serial_cmd(
+    cmd: PcToRx,
+    state: &'static Mutex<NoopRawMutex, RxState>,
+    resp_tx: &embassy_sync::channel::Sender<'static, NoopRawMutex, RxToPc, 8>,
+) {
+    match cmd {
+        PcToRx::QueryStatus => {
+            let s = state.lock().await;
+            resp_tx.send(RxToPc::Status {
+                sweeping: false,
+                tx_connected: s.tx_paired,
+                turntable_connected: s.turntable_paired,
+            }).await;
+        }
+        PcToRx::StartSweep { .. } => {
+            // TODO: implement sweep coordinator
+            let mut desc = heapless::String::new();
+            let _ = desc.push_str("Sweep not yet implemented");
+            resp_tx.send(RxToPc::Error { description: desc }).await;
+        }
+        PcToRx::Stop => {
+            info!("Stop command received");
+        }
+        PcToRx::ConfigureTx { .. } => {
+            info!("ConfigureTx received (not yet forwarded to TX)");
+        }
+    }
+}
+
+/// Sends RxToPc responses as COBS-framed postcard over USB-Serial-JTAG.
+#[embassy_executor::task]
+async fn serial_tx_task(
+    usb_tx: &'static Mutex<NoopRawMutex, UsbSerialJtagTx<'static, Async>>,
+    resp_rx: embassy_sync::channel::Receiver<'static, NoopRawMutex, RxToPc, 8>,
+) {
+    let mut buf = [0u8; COBS_BUF_SIZE];
+
+    loop {
+        let msg = resp_rx.receive().await;
+        match proto::serialize_cobs(&msg, &mut buf) {
+            Ok(len) => {
+                let mut tx = usb_tx.lock().await;
+                let _ = tx.write_all(&buf[..len]).await;
+                let _ = tx.flush().await;
+            }
+            Err(_) => {
+                info!("Failed to serialize RxToPc response");
+            }
+        }
     }
 }

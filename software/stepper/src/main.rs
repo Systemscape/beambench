@@ -15,6 +15,7 @@ mod motor;
 use defmt::info;
 use embassy_executor::Spawner;
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, mutex::Mutex, signal::Signal};
+use embassy_futures::select::{Either, select};
 use embassy_time::{Duration, Timer};
 use esp_alloc as _;
 use esp_backtrace as _;
@@ -80,6 +81,19 @@ enum MotorResult {
     MoveComplete { angle_deg: f32 },
     Error { msg: &'static str },
 }
+
+/// LED state for the led_task.
+#[derive(Clone, Copy)]
+enum LedState {
+    Solid(RGB8),
+    /// Blink between `color` and off, with `period_ms` total cycle time.
+    Blink { color: RGB8, period_ms: u64 },
+}
+
+const COLOR_BLUE: RGB8 = RGB8 { r: 0, g: 0, b: 255 };
+const COLOR_GREEN: RGB8 = RGB8 { r: 0, g: 255, b: 0 };
+const COLOR_AMBER: RGB8 = RGB8 { r: 255, g: 80, b: 0 };
+const COLOR_OFF: RGB8 = RGB8 { r: 0, g: 0, b: 0 };
 
 // Re-export stepper math from protocol crate.
 use beambench_protocol::stepper::{degrees_to_steps, steps_to_degrees};
@@ -149,7 +163,9 @@ async fn main(spawner: Spawner) -> ! {
     .unwrap();
 
     // Blue = alive, booting.
-    let _ = led.write(core::iter::once(RGB8 { r: 0, g: 0, b: 255 }));
+    let _ = led.write(core::iter::once(COLOR_BLUE));
+
+    let led_signal = mk_static!(Signal<NoopRawMutex, LedState>, Signal::new());
 
     let (manager, sender, receiver) = esp_now.split();
     let manager = mk_static!(EspNowManager<'static>, manager);
@@ -176,7 +192,7 @@ async fn main(spawner: Spawner) -> ! {
             Mutex::<NoopRawMutex, StepDirMotor<'static>>,
             Mutex::new(motor)
         );
-        spawner.spawn(motor_task_step_dir(motor, motor_cmd, motor_result)).ok();
+        spawner.spawn(motor_task_step_dir(motor, motor_cmd, motor_result, led_signal)).ok();
     }
     #[cfg(feature = "servo42c")]
     {
@@ -184,7 +200,7 @@ async fn main(spawner: Spawner) -> ! {
             Mutex::<NoopRawMutex, Servo42cMotor<'static>>,
             Mutex::new(motor)
         );
-        spawner.spawn(motor_task_servo42c(motor, motor_cmd, motor_result)).ok();
+        spawner.spawn(motor_task_servo42c(motor, motor_cmd, motor_result, led_signal)).ok();
     }
 
     info!("Turntable controller ready, discovering RX...");
@@ -192,11 +208,31 @@ async fn main(spawner: Spawner) -> ! {
     // Wait for RX pairing, then turn LED green.
     paired_signal.wait().await;
     info!("Paired with RX — LED green");
-    let _ = led.write(core::iter::once(RGB8 { r: 0, g: 255, b: 0 }));
 
-    // Main loop does nothing — all work is in tasks.
+    // Main loop: drive LED state machine. Tasks signal state changes via led_signal.
+    let mut led_state = LedState::Solid(COLOR_GREEN);
     loop {
-        Timer::after(Duration::from_secs(60)).await;
+        match led_state {
+            LedState::Solid(color) => {
+                let _ = led.write(core::iter::once(color));
+                led_state = led_signal.wait().await;
+            }
+            LedState::Blink { color, period_ms } => {
+                let half = Duration::from_millis(period_ms / 2);
+                loop {
+                    let _ = led.write(core::iter::once(color));
+                    match select(led_signal.wait(), Timer::after(half)).await {
+                        Either::First(new) => { led_state = new; break; }
+                        Either::Second(_) => {}
+                    }
+                    let _ = led.write(core::iter::once(COLOR_OFF));
+                    match select(led_signal.wait(), Timer::after(half)).await {
+                        Either::First(new) => { led_state = new; break; }
+                        Either::Second(_) => {}
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -317,10 +353,11 @@ async fn motor_task_step_dir(
     motor: &'static Mutex<NoopRawMutex, StepDirMotor<'static>>,
     cmd_signal: &'static Signal<NoopRawMutex, MotorCmd>,
     result_signal: &'static Signal<NoopRawMutex, MotorResult>,
+    led_signal: &'static Signal<NoopRawMutex, LedState>,
 ) {
     motor.lock().await.set_enabled(true);
     info!("Motor enabled (step-dir)");
-    motor_loop(motor, cmd_signal, result_signal).await;
+    motor_loop(motor, cmd_signal, result_signal, led_signal).await;
 }
 
 /// Runs motor operations (servo42c backend).
@@ -330,10 +367,11 @@ async fn motor_task_servo42c(
     motor: &'static Mutex<NoopRawMutex, Servo42cMotor<'static>>,
     cmd_signal: &'static Signal<NoopRawMutex, MotorCmd>,
     result_signal: &'static Signal<NoopRawMutex, MotorResult>,
+    led_signal: &'static Signal<NoopRawMutex, LedState>,
 ) {
     motor.lock().await.set_enabled(true);
     info!("Motor enabled (servo42c)");
-    motor_loop(motor, cmd_signal, result_signal).await;
+    motor_loop(motor, cmd_signal, result_signal, led_signal).await;
 }
 
 /// Shared motor control loop — works with any Motor implementation.
@@ -341,6 +379,7 @@ async fn motor_loop<M: Motor>(
     motor: &'static Mutex<NoopRawMutex, M>,
     cmd_signal: &'static Signal<NoopRawMutex, MotorCmd>,
     result_signal: &'static Signal<NoopRawMutex, MotorResult>,
+    led_signal: &'static Signal<NoopRawMutex, LedState>,
 ) {
     loop {
         let cmd = cmd_signal.wait().await;
@@ -349,7 +388,12 @@ async fn motor_loop<M: Motor>(
                 let target_steps = degrees_to_steps(angle_deg);
                 info!("Moving to {}° ({} steps)", angle_deg, target_steps);
 
+                led_signal.signal(LedState::Blink { color: COLOR_AMBER, period_ms: 200 });
+
                 let result = motor.lock().await.go_to(target_steps);
+
+                led_signal.signal(LedState::Solid(COLOR_GREEN));
+
                 match result {
                     Ok(pos) => {
                         let actual_deg = steps_to_degrees(pos);
@@ -368,6 +412,7 @@ async fn motor_loop<M: Motor>(
             }
             MotorCmd::Stop => {
                 motor.lock().await.stop();
+                led_signal.signal(LedState::Solid(COLOR_GREEN));
                 info!("Motor stopped");
             }
         }

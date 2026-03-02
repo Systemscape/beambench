@@ -9,6 +9,7 @@
 use defmt::info;
 use embassy_executor::Spawner;
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, mutex::Mutex, signal::Signal};
+use embassy_futures::select::{Either, select};
 use embassy_time::{Duration, Timer};
 use esp_alloc as _;
 use esp_backtrace as _;
@@ -74,6 +75,18 @@ impl TxState {
     }
 }
 
+/// LED state for the led_task.
+#[derive(Clone, Copy)]
+enum LedState {
+    Solid(RGB8),
+    Blink { color: RGB8, period_ms: u64 },
+}
+
+const COLOR_BLUE: RGB8 = RGB8 { r: 0, g: 0, b: 255 };
+const COLOR_GREEN: RGB8 = RGB8 { r: 0, g: 255, b: 0 };
+const COLOR_AMBER: RGB8 = RGB8 { r: 255, g: 80, b: 0 };
+const COLOR_OFF: RGB8 = RGB8 { r: 0, g: 0, b: 0 };
+
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 #[esp_rtos::main]
@@ -115,7 +128,9 @@ async fn main(spawner: Spawner) -> ! {
     .unwrap();
 
     // Blue = alive, booting.
-    let _ = led.write(core::iter::once(RGB8 { r: 0, g: 0, b: 255 }));
+    let _ = led.write(core::iter::once(COLOR_BLUE));
+
+    let led_signal = mk_static!(Signal<NoopRawMutex, LedState>, Signal::new());
 
     let (manager, sender, receiver) = esp_now.split();
     let manager = mk_static!(EspNowManager<'static>, manager);
@@ -131,7 +146,7 @@ async fn main(spawner: Spawner) -> ! {
     let paired_signal = mk_static!(Signal<NoopRawMutex, ()>, Signal::new());
 
     spawner.spawn(discovery_task(manager, sender, state)).ok();
-    spawner.spawn(listener_task(manager, sender, receiver, state, paired_signal)).ok();
+    spawner.spawn(listener_task(manager, sender, receiver, state, paired_signal, led_signal)).ok();
     spawner.spawn(transmit_task(sender, state)).ok();
 
     info!("TX firmware ready, broadcasting discovery beacons");
@@ -139,11 +154,31 @@ async fn main(spawner: Spawner) -> ! {
     // Wait for RX pairing, then turn LED green.
     paired_signal.wait().await;
     info!("Paired with RX — LED green");
-    let _ = led.write(core::iter::once(RGB8 { r: 0, g: 255, b: 0 }));
 
-    // Main loop: just keep alive.
+    // Main loop: drive LED state machine. Tasks signal state changes via led_signal.
+    let mut led_state = LedState::Solid(COLOR_GREEN);
     loop {
-        Timer::after(Duration::from_secs(60)).await;
+        match led_state {
+            LedState::Solid(color) => {
+                let _ = led.write(core::iter::once(color));
+                led_state = led_signal.wait().await;
+            }
+            LedState::Blink { color, period_ms } => {
+                let half = Duration::from_millis(period_ms / 2);
+                loop {
+                    let _ = led.write(core::iter::once(color));
+                    match select(led_signal.wait(), Timer::after(half)).await {
+                        Either::First(new) => { led_state = new; break; }
+                        Either::Second(_) => {}
+                    }
+                    let _ = led.write(core::iter::once(COLOR_OFF));
+                    match select(led_signal.wait(), Timer::after(half)).await {
+                        Either::First(new) => { led_state = new; break; }
+                        Either::Second(_) => {}
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -187,6 +222,7 @@ async fn listener_task(
     mut receiver: EspNowReceiver<'static>,
     state: &'static Mutex<NoopRawMutex, TxState>,
     paired_signal: &'static Signal<NoopRawMutex, ()>,
+    led_signal: &'static Signal<NoopRawMutex, LedState>,
 ) {
     loop {
         let received = receiver.receive_async().await;
@@ -230,10 +266,12 @@ async fn listener_task(
                     proto::TxCommand::StartTransmit => {
                         info!("Start transmitting");
                         state.lock().await.transmitting = true;
+                        led_signal.signal(LedState::Blink { color: COLOR_AMBER, period_ms: 200 });
                     }
                     proto::TxCommand::StopTransmit => {
                         info!("Stop transmitting");
                         state.lock().await.transmitting = false;
+                        led_signal.signal(LedState::Solid(COLOR_GREEN));
                     }
                 }
             }

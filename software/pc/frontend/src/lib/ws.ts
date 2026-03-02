@@ -14,11 +14,17 @@ export type SystemStatus = {
 	data_points: number;
 };
 
+export type PortInfo = {
+	name: string;
+	description: string;
+};
+
 export type WsEvent =
 	| { type: 'DataPoint'; angle_deg: number; rssi_dbm: number; sample_count: number }
 	| { type: 'SweepComplete' }
 	| { type: 'Status'; sweeping: boolean; tx_connected: boolean; turntable_connected: boolean; serial_connected: boolean; data_points: number }
-	| { type: 'Error'; message: string };
+	| { type: 'Error'; message: string }
+	| { type: 'Log'; message: string };
 
 export type WsCommand =
 	| { type: 'StartSweep'; start_deg: number; stop_deg: number; step_deg: number; samples_per_angle: number }
