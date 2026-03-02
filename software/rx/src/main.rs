@@ -691,6 +691,24 @@ async fn run_sweep_inner(
         }).await;
     }
 
+    // Return turntable to start position so the next sweep doesn't backtrack first.
+    info!("Sweep done, returning to {}°", cmd.start_deg);
+    turntable_resp_signal.reset();
+    send_turntable_cmd(sender, state, proto::TurntableCommand::MoveTo { angle_deg: cmd.start_deg }).await;
+    let resp = select(
+        turntable_resp_signal.wait(),
+        Timer::after(Duration::from_secs(30)),
+    ).await;
+    match resp {
+        Either::First(proto::TurntableResponse::MoveComplete { .. }) => {}
+        Either::First(proto::TurntableResponse::Error { description }) => {
+            info!("Return-to-start error: {}", description.as_str());
+        }
+        Either::Second(_) => {
+            info!("Return-to-start timeout");
+        }
+    }
+
     Ok(())
 }
 
