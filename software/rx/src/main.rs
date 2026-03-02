@@ -57,6 +57,7 @@ struct RxState {
     tx_mac: [u8; 6],
     turntable_paired: bool,
     turntable_mac: [u8; 6],
+    sweeping: bool,
 }
 
 impl RxState {
@@ -66,6 +67,7 @@ impl RxState {
             tx_mac: [0u8; 6],
             turntable_paired: false,
             turntable_mac: [0u8; 6],
+            sweeping: false,
         }
     }
 
@@ -85,6 +87,14 @@ const COLOR_BLUE: RGB8 = RGB8 { r: 0, g: 0, b: 255 };
 const COLOR_GREEN: RGB8 = RGB8 { r: 0, g: 255, b: 0 };
 const COLOR_AMBER: RGB8 = RGB8 { r: 255, g: 80, b: 0 };
 const COLOR_OFF: RGB8 = RGB8 { r: 0, g: 0, b: 0 };
+
+/// Sweep parameters sent from serial_rx_task to sweep_task.
+struct SweepCmd {
+    start_deg: f32,
+    stop_deg: f32,
+    step_deg: f32,
+    _samples_per_angle: u16, // Phase B: used for RSSI averaging
+}
 
 // ── Entry point ──────────────────────────────────────────────────────────────
 
@@ -156,13 +166,24 @@ async fn main(spawner: Spawner) -> ! {
         Mutex::<NoopRawMutex, _>::new(RxState::new())
     );
     let rssi_signal = mk_static!(Signal<NoopRawMutex, i32>, Signal::new());
+    let sweep_cmd_ch = mk_static!(Channel::<NoopRawMutex, SweepCmd, 1>, Channel::new());
+    let turntable_resp_signal = mk_static!(
+        Signal<NoopRawMutex, proto::TurntableResponse>,
+        Signal::new()
+    );
+    let stop_signal = mk_static!(Signal<NoopRawMutex, ()>, Signal::new());
 
     spawner.spawn(discovery_task(sender, state)).ok();
     spawner
-        .spawn(listener_task(manager, sender, receiver, state, rssi_signal, led_signal))
+        .spawn(listener_task(manager, sender, receiver, state, rssi_signal, led_signal, turntable_resp_signal))
         .ok();
-    spawner.spawn(serial_rx_task(usb_rx, state, serial_resp_ch.sender())).ok();
+    spawner.spawn(serial_rx_task(usb_rx, state, serial_resp_ch.sender(), sweep_cmd_ch.sender(), stop_signal, sender)).ok();
     spawner.spawn(serial_tx_task(usb_tx, serial_resp_ch.receiver())).ok();
+    spawner.spawn(sweep_task(
+        sender, state, turntable_resp_signal,
+        sweep_cmd_ch.receiver(), stop_signal,
+        serial_resp_ch.sender(), led_signal,
+    )).ok();
 
     info!("RX coordinator ready, discovering peers...");
 
@@ -245,6 +266,7 @@ async fn listener_task(
     state: &'static Mutex<NoopRawMutex, RxState>,
     rssi_signal: &'static Signal<NoopRawMutex, i32>,
     led_signal: &'static Signal<NoopRawMutex, LedState>,
+    turntable_resp_signal: &'static Signal<NoopRawMutex, proto::TurntableResponse>,
 ) {
     let mut activity_active = false;
     let mut last_rssi_tick: u64 = 0;
@@ -280,14 +302,17 @@ async fn listener_task(
             Ok(EspnowMessage::Hello(hello)) => {
                 handle_hello(manager, sender, state, &src, &hello).await;
             }
-            Ok(EspnowMessage::TurntableResp(resp)) => match resp {
-                proto::TurntableResponse::MoveComplete { angle_deg } => {
-                    info!("Turntable reached {}", angle_deg);
+            Ok(EspnowMessage::TurntableResp(resp)) => {
+                match &resp {
+                    proto::TurntableResponse::MoveComplete { angle_deg } => {
+                        info!("Turntable reached {}", angle_deg);
+                    }
+                    proto::TurntableResponse::Error { description } => {
+                        info!("Turntable error: {}", description.as_str());
+                    }
                 }
-                proto::TurntableResponse::Error { description } => {
-                    info!("Turntable error: {}", description.as_str());
-                }
-            },
+                turntable_resp_signal.signal(resp);
+            }
             _ => {
                 // Unrecognized payload — likely a TX measurement packet.
                 // Record the RSSI.
@@ -386,6 +411,9 @@ async fn serial_rx_task(
     usb_rx: &'static mut UsbSerialJtagRx<'static, Async>,
     state: &'static Mutex<NoopRawMutex, RxState>,
     resp_tx: embassy_sync::channel::Sender<'static, NoopRawMutex, RxToPc, 8>,
+    sweep_cmd_tx: embassy_sync::channel::Sender<'static, NoopRawMutex, SweepCmd, 1>,
+    stop_signal: &'static Signal<NoopRawMutex, ()>,
+    sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
 ) {
     let mut raw_buf = [0u8; 64];
     let mut accum: heapless::Vec<u8, COBS_BUF_SIZE> = heapless::Vec::new();
@@ -412,7 +440,7 @@ async fn serial_rx_task(
                     match postcard::from_bytes_cobs::<PcToRx>(&mut frame_buf[..len + 1]) {
                         Ok(cmd) => {
                             info!("Serial cmd: {:?}", defmt::Debug2Format(&cmd));
-                            handle_serial_cmd(cmd, state, &resp_tx).await;
+                            handle_serial_cmd(cmd, state, &resp_tx, &sweep_cmd_tx, stop_signal, sender).await;
                         }
                         Err(_) => {
                             info!("Failed to decode serial COBS frame ({} bytes)", len);
@@ -434,29 +462,234 @@ async fn handle_serial_cmd(
     cmd: PcToRx,
     state: &'static Mutex<NoopRawMutex, RxState>,
     resp_tx: &embassy_sync::channel::Sender<'static, NoopRawMutex, RxToPc, 8>,
+    sweep_cmd_tx: &embassy_sync::channel::Sender<'static, NoopRawMutex, SweepCmd, 1>,
+    stop_signal: &'static Signal<NoopRawMutex, ()>,
+    sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
 ) {
     match cmd {
         PcToRx::QueryStatus => {
             let s = state.lock().await;
             resp_tx.send(RxToPc::Status {
-                sweeping: false,
+                sweeping: s.sweeping,
                 tx_connected: s.tx_paired,
                 turntable_connected: s.turntable_paired,
             }).await;
         }
-        PcToRx::StartSweep { .. } => {
-            // TODO: implement sweep coordinator
-            let mut desc = heapless::String::new();
-            let _ = desc.push_str("Sweep not yet implemented");
-            resp_tx.send(RxToPc::Error { description: desc }).await;
+        PcToRx::StartSweep { start_deg, stop_deg, step_deg, samples_per_angle } => {
+            // Reject if already sweeping.
+            if state.lock().await.sweeping {
+                let mut desc = heapless::String::new();
+                let _ = desc.push_str("Sweep already in progress");
+                resp_tx.send(RxToPc::Error { description: desc }).await;
+                return;
+            }
+            // Basic validation.
+            if step_deg <= 0.0 {
+                let mut desc = heapless::String::new();
+                let _ = desc.push_str("step_deg must be positive");
+                resp_tx.send(RxToPc::Error { description: desc }).await;
+                return;
+            }
+            // Send sweep command to sweep_task (non-blocking try_send would lose error;
+            // channel size 1 means this blocks only if sweep_task hasn't consumed the last cmd).
+            sweep_cmd_tx.send(SweepCmd {
+                start_deg,
+                stop_deg,
+                step_deg,
+                _samples_per_angle: samples_per_angle,
+            }).await;
         }
         PcToRx::Stop => {
             info!("Stop command received");
+            stop_signal.signal(());
+            // Also send immediate Stop to turntable for fast halt.
+            send_turntable_cmd(sender, state, proto::TurntableCommand::Stop).await;
         }
-        PcToRx::ConfigureTx { .. } => {
-            info!("ConfigureTx received (not yet forwarded to TX)");
+        PcToRx::ConfigureTx { channel, tx_power_dbm, packet_rate_hz } => {
+            send_tx_cmd(sender, state, proto::TxCommand::Configure {
+                channel,
+                tx_power_dbm,
+                packet_rate_hz,
+            }).await;
         }
     }
+}
+
+// ── ESPNOW command helpers ──────────────────────────────────────────────────
+
+/// Send a TurntableCommand to the paired turntable via ESPNOW.
+async fn send_turntable_cmd(
+    sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
+    state: &'static Mutex<NoopRawMutex, RxState>,
+    cmd: proto::TurntableCommand,
+) {
+    let mac = {
+        let s = state.lock().await;
+        if !s.turntable_paired {
+            info!("Cannot send turntable cmd: not paired");
+            return;
+        }
+        s.turntable_mac
+    };
+    let msg = EspnowMessage::TurntableCmd(cmd);
+    let mut buf = [0u8; proto::MAX_MSG_SIZE];
+    if let Ok(data) = proto::serialize(&msg, &mut buf) {
+        let mut s = sender.lock().await;
+        let _ = s.send_async(&mac, data).await;
+    }
+}
+
+/// Send a TxCommand to the paired TX board via ESPNOW.
+async fn send_tx_cmd(
+    sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
+    state: &'static Mutex<NoopRawMutex, RxState>,
+    cmd: proto::TxCommand,
+) {
+    let mac = {
+        let s = state.lock().await;
+        if !s.tx_paired {
+            info!("Cannot send TX cmd: not paired");
+            return;
+        }
+        s.tx_mac
+    };
+    let msg = EspnowMessage::TxCmd(cmd);
+    let mut buf = [0u8; proto::MAX_MSG_SIZE];
+    if let Ok(data) = proto::serialize(&msg, &mut buf) {
+        let mut s = sender.lock().await;
+        let _ = s.send_async(&mac, data).await;
+    }
+}
+
+// ── Sweep task ──────────────────────────────────────────────────────────────
+
+/// Pre-spawned sweep coordinator. Waits for SweepCmd on the channel,
+/// then executes the sweep and sends results back via serial_resp_ch.
+#[embassy_executor::task]
+async fn sweep_task(
+    sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
+    state: &'static Mutex<NoopRawMutex, RxState>,
+    turntable_resp_signal: &'static Signal<NoopRawMutex, proto::TurntableResponse>,
+    sweep_cmd_rx: embassy_sync::channel::Receiver<'static, NoopRawMutex, SweepCmd, 1>,
+    stop_signal: &'static Signal<NoopRawMutex, ()>,
+    resp_tx: embassy_sync::channel::Sender<'static, NoopRawMutex, RxToPc, 8>,
+    led_signal: &'static Signal<NoopRawMutex, LedState>,
+) {
+    loop {
+        let cmd = sweep_cmd_rx.receive().await;
+
+        // Mark sweeping.
+        state.lock().await.sweeping = true;
+        // Drain any stale signals.
+        turntable_resp_signal.reset();
+        stop_signal.reset();
+
+        info!(
+            "Sweep start: {}° to {}° step {}°",
+            cmd.start_deg, cmd.stop_deg, cmd.step_deg
+        );
+        led_signal.signal(LedState::Blink { color: COLOR_AMBER, period_ms: 500 });
+
+        let result = run_sweep_inner(
+            &cmd, sender, state, turntable_resp_signal, stop_signal, &resp_tx,
+        ).await;
+
+        match result {
+            Ok(()) => {
+                info!("Sweep complete");
+                resp_tx.send(RxToPc::SweepComplete).await;
+            }
+            Err(desc) => {
+                info!("Sweep failed: {}", desc.as_str());
+                resp_tx.send(RxToPc::Error { description: desc }).await;
+            }
+        }
+
+        state.lock().await.sweeping = false;
+        led_signal.signal(LedState::Solid(COLOR_GREEN));
+    }
+}
+
+/// Phase A sweep: step turntable through all angles, send DataPoints with dummy RSSI.
+async fn run_sweep_inner(
+    cmd: &SweepCmd,
+    sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
+    state: &'static Mutex<NoopRawMutex, RxState>,
+    turntable_resp_signal: &'static Signal<NoopRawMutex, proto::TurntableResponse>,
+    stop_signal: &'static Signal<NoopRawMutex, ()>,
+    resp_tx: &embassy_sync::channel::Sender<'static, NoopRawMutex, RxToPc, 8>,
+) -> Result<(), heapless::String<128>> {
+    // Check turntable is paired.
+    if !state.lock().await.turntable_paired {
+        let mut desc = heapless::String::new();
+        let _ = desc.push_str("Turntable not connected");
+        return Err(desc);
+    }
+
+    // Iterate through angles.
+    let mut angle = cmd.start_deg;
+    let going_forward = cmd.stop_deg >= cmd.start_deg;
+
+    loop {
+        // Bounds check.
+        if going_forward && angle > cmd.stop_deg + f32::EPSILON {
+            break;
+        }
+        if !going_forward && angle < cmd.stop_deg - f32::EPSILON {
+            break;
+        }
+
+        // Check for stop signal.
+        if stop_signal.signaled() {
+            let mut desc = heapless::String::new();
+            let _ = desc.push_str("Sweep aborted");
+            return Err(desc);
+        }
+
+        // Send MoveTo command.
+        info!("Sweep: moving to {}°", angle);
+        turntable_resp_signal.reset();
+        send_turntable_cmd(sender, state, proto::TurntableCommand::MoveTo { angle_deg: angle }).await;
+
+        // Wait for turntable response with 30s timeout.
+        let resp = select(
+            turntable_resp_signal.wait(),
+            Timer::after(Duration::from_secs(30)),
+        ).await;
+
+        match resp {
+            Either::First(proto::TurntableResponse::MoveComplete { .. }) => {
+                // Turntable reached target angle.
+            }
+            Either::First(proto::TurntableResponse::Error { description }) => {
+                let mut desc = heapless::String::<128>::new();
+                let _ = desc.push_str("Turntable error: ");
+                let _ = desc.push_str(description.as_str());
+                return Err(desc);
+            }
+            Either::Second(_) => {
+                let mut desc = heapless::String::new();
+                let _ = desc.push_str("Turntable move timeout (30s)");
+                return Err(desc);
+            }
+        }
+
+        // Phase A: send DataPoint with dummy RSSI.
+        resp_tx.send(RxToPc::DataPoint {
+            angle_deg: angle,
+            rssi_dbm: 0.0,
+            sample_count: 0,
+        }).await;
+
+        // Advance angle.
+        if going_forward {
+            angle += cmd.step_deg;
+        } else {
+            angle -= cmd.step_deg;
+        }
+    }
+
+    Ok(())
 }
 
 /// Sends RxToPc responses as COBS-framed postcard over USB-Serial-JTAG.
