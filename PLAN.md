@@ -222,6 +222,11 @@ build-firmware:
 build-pc:
     just software/pc/build
 
+# Run all host-side tests (protocol + PC)
+test:
+    just software/protocol/test
+    just software/pc/test-all
+
 # Check all crates compile
 check:
     just software/protocol/check
@@ -251,30 +256,48 @@ check:
 # Development: run Axum backend + Vite dev server concurrently
 dev:
     #!/usr/bin/env bash
-    cd frontend && npm run dev &
+    cd frontend && pnpm run dev &
     VITE_PID=$!
-    cargo run -- --dev
+    cargo run --bin beambench-pc -- --dev
     kill $VITE_PID 2>/dev/null
 
 # Build for release: compile Svelte to static files, build Rust binary
 build:
-    cd frontend && npm run build
-    cargo build --release
+    cd frontend && pnpm run build
+    cargo build --bin beambench-pc --release
 
 # Run release build (serves embedded frontend)
 run:
     cargo run --release
 
+# Run RX simulator
+sim:
+    cargo run --bin rx-sim --features sim
+
 # Check Rust code only
 check:
     cargo check
+
+# Run unit tests (lib only)
+test:
+    cargo test --lib
+
+# Run integration tests (requires sim feature)
+test-integration:
+    cargo test --test integration --features sim
+
+# Run all tests
+test-all:
+    cargo test --features sim
 ```
 
 **Protocol** (`protocol/justfile`):
 ```just
 check:
     cargo check
-    cargo check --target riscv32imc-unknown-none-elf
+
+test:
+    cargo test
 ```
 
 ## PC Application
@@ -308,8 +331,15 @@ pc/
   justfile
   Cargo.toml
   src/
-    lib.rs          (core: serial protocol, sweep state, data store, export)
+    lib.rs          (core: types, sweep config validation, CSV export)
     main.rs         (Axum server: REST + WebSocket, serves embedded frontend)
+    serial.rs       (COBS-framed serial/TCP communication with RX board)
+    sweep.rs        (sweep state machine: orchestrates measurement campaign)
+    sim.rs          (extracted rx-sim logic, behind cfg(test/sim) gate)
+    bin/
+      rx-sim.rs     (TCP simulator binary — thin wrapper around sim.rs)
+  tests/
+    integration.rs  (end-to-end tests: PC ↔ rx-sim over TCP)
   frontend/         (SvelteKit SPA with Plotly.js)
     src/
       routes/
@@ -333,14 +363,16 @@ wideband measurements with >60 dB dynamic range.
 
 - **Language**: Rust (nightly, for ESP32-C3 `build-std`)
 - **Target**: `riscv32imc-unknown-none-elf` (ESP32-C3)
-- **HAL**: esp-hal 1.0.0
-- **Async**: Embassy executor (firmware)
-- **Logging**: defmt + probe-rs
-- **Wireless**: ESPNOW (via esp-wifi)
-- **Serial protocol**: postcard + COBS
+- **HAL**: esp-hal 1.0.0 (unstable feature)
+- **Radio**: esp-radio 0.17.0 (ESPNOW, unstable feature)
+- **Async**: Embassy executor via esp-rtos 0.2.0 (firmware), Tokio (PC)
+- **Logging**: defmt 1.0.1 + probe-rs (firmware), tracing (PC)
+- **Serial protocol**: postcard + COBS framing
 - **Motor control**: mks-servo42-rs (UART) or GPIO step/dir
-- **PC backend**: Axum (HTTP/WebSocket server)
-- **PC frontend**: Svelte + Plotly.js (polar chart)
+- **PC backend**: Axum 0.8 (HTTP/WebSocket server)
+- **PC frontend**: SvelteKit + Plotly.js (polar chart)
+- **PC serial**: tokio-serial 5.4 (USB) + TCP (rx-sim)
+- **Package manager**: pnpm (frontend)
 
 ## Implementation Phases
 
@@ -351,21 +383,37 @@ wideband measurements with >60 dB dynamic range.
 - [x] Servo42C UART backend (compiles, untested on hardware)
 - [x] Feature-gated backend selection
 
-### Phase 1 — ESPNOW RSSI at 2.4 GHz
+### Phase 1 — ESPNOW RSSI at 2.4 GHz (done)
 
-1. Create `protocol` crate with shared message types (serial + ESPNOW)
-2. Refactor stepper firmware to Embassy async, add ESPNOW peer discovery
-   and command handling (non-blocking motor control)
-3. TX firmware: ESPNOW peer discovery, configurable packet transmission
-4. RX firmware: ESPNOW coordinator (discover peers, send commands),
-   RSSI measurement, USB-serial bridge to PC
-5. PC application: configure sweep, live polar plot, CSV/image export,
-   error display
-6. Integration test: full sweep with all three boards
+- [x] `protocol` crate with all serial + ESPNOW message types
+- [x] Stepper firmware refactored to Embassy async + ESPNOW discovery/commands
+- [x] TX firmware: ESPNOW discovery, configurable packet transmission
+- [x] RX firmware: ESPNOW coordinator, RSSI measurement, USB-serial bridge
+- [x] PC application: Axum backend + Svelte frontend + Plotly.js polar plot
+- [x] Serial/TCP transport with COBS framing
+- [x] rx-sim TCP simulator for development without hardware
+- [x] Sweep state machine with timeout, concurrent guard, config validation
+- [x] Host-side test suite (31 tests):
+  - Protocol: postcard/COBS round-trips, EspnowMessage envelope, stepper math
+  - PC unit: JSON contract, SweepConfig validation, COBS framing edge cases
+  - PC integration: end-to-end sweep + abort via rx-sim over TCP
+- [x] Stepper angle conversion math extracted to `protocol::stepper` (testable on host)
+- [x] `just test` recipes at all levels
 
-### Phase 2 — Wideband Measurements
+### Phase 2 — Wideband Measurements (ADF4351 + AD8318)
 
-1. Add ADF4351 SPI driver to TX firmware
-2. Add AD8318 ADC reading to RX firmware
-3. Extend protocol for frequency sweep parameters
-4. Update PC app for frequency-domain visualization
+Adds dedicated RF hardware for calibrated measurements at any frequency
+from 35 MHz to 4.4 GHz. Dual-mode: Phase 1 ESPNOW RSSI coexists alongside
+Phase 2 hardware measurements.
+
+Hardware: ADF4351 PLL synthesizer module (~$20) on TX board via SPI,
+AD8318 log detector module (~$20) on RX board via ADC.
+
+1. Extend protocol with `SetFrequency`/`EnableOutput`/`DisableOutput`
+   TX commands + optional `frequency_hz` field on sweep config
+2. Add ADF4351 SPI driver to TX firmware (evaluate `adf4351`/`adf435x`
+   crates or write minimal inline driver — 6 × 32-bit register writes)
+3. Add AD8318 ADC reading to RX firmware (esp-hal ADC, voltage→dBm
+   conversion using datasheet nominal slope/intercept)
+4. Update PC app: frequency field in SweepConfig + frontend UI
+5. Calibration: start with datasheet nominals, per-module calibration later

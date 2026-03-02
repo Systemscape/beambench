@@ -113,6 +113,7 @@ async fn ws_handler(
 }
 
 async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
+    info!("WebSocket client connected");
     let mut rx = state.ws_tx.subscribe();
 
     // Send current status on connect.
@@ -134,10 +135,23 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
     loop {
         tokio::select! {
             // Forward events from backend to WebSocket client.
-            Ok(event) = rx.recv() => {
-                let json = serde_json::to_string(&event).unwrap();
-                if socket.send(Message::Text(json.into())).await.is_err() {
-                    return;
+            result = rx.recv() => {
+                match result {
+                    Ok(event) => {
+                        let json = serde_json::to_string(&event).unwrap();
+                        if socket.send(Message::Text(json.into())).await.is_err() {
+                            info!("WebSocket send failed, closing");
+                            return;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("WebSocket receiver lagged, skipped {} events", n);
+                        // Continue — the receiver auto-advances past the gap.
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        info!("Broadcast channel closed, WebSocket shutting down");
+                        return;
+                    }
                 }
             }
             // Handle commands from WebSocket client.
@@ -148,6 +162,7 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
                             handle_command(cmd, &state).await;
                         }
                         Err(e) => {
+                            tracing::warn!("Invalid WS command: {}", e);
                             let _ = state.ws_tx.send(WsEvent::Error {
                                 message: format!("Invalid command: {}", e),
                             });
@@ -155,7 +170,10 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
                     }
                 }
             }
-            else => return,
+            else => {
+                info!("WebSocket client disconnected");
+                return;
+            }
         }
     }
 }
@@ -166,7 +184,15 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
             // Respond via WsEvent (ports listed via REST endpoint too).
         }
         WsCommand::Connect { port } => {
+            info!("Connect requested: {}", port);
             let mut serial = state.serial.lock().await;
+
+            // Close previous connection if any.
+            if let Some(old) = serial.take() {
+                info!("Closing previous serial connection");
+                old.close();
+            }
+
             let result = if let Some(addr) = port.strip_prefix("tcp://") {
                 beambench_pc::serial::SerialHandle::open_tcp(addr).await
             } else {
@@ -175,6 +201,7 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
             match result {
                 Ok(handle) => {
                     *serial = Some(handle);
+                    info!("Serial connected to {}", port);
                     let _ = state.ws_tx.send(WsEvent::Status(SystemStatus {
                         sweeping: false,
                         tx_connected: false,
@@ -184,6 +211,7 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
                     }));
                 }
                 Err(e) => {
+                    info!("Failed to connect to {}: {}", port, e);
                     let _ = state.ws_tx.send(WsEvent::Error {
                         message: format!("Failed to open {}: {}", port, e),
                     });
@@ -193,8 +221,16 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
         WsCommand::Disconnect => {
             let mut serial = state.serial.lock().await;
             if let Some(handle) = serial.take() {
+                info!("Disconnecting serial");
                 handle.close();
             }
+            let _ = state.ws_tx.send(WsEvent::Status(SystemStatus {
+                sweeping: false,
+                tx_connected: false,
+                turntable_connected: false,
+                serial_connected: false,
+                data_points: state.data.lock().await.len(),
+            }));
         }
         WsCommand::StartSweep(config) => {
             // Prevent concurrent sweeps.

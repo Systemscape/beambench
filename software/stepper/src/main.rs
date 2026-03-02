@@ -15,15 +15,19 @@ mod motor;
 use defmt::info;
 use embassy_executor::Spawner;
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, mutex::Mutex, signal::Signal};
-use embassy_time::{Duration, Ticker, Timer};
+use embassy_time::{Duration, Timer};
 use esp_alloc as _;
 use esp_backtrace as _;
 use esp_hal::{
     clock::CpuClock,
     delay::Delay,
     interrupt::software::SoftwareInterruptControl,
+    rmt::Rmt,
+    time::Rate,
     timer::timg::TimerGroup,
 };
+use esp_hal_smartled::{buffer_size, color_order, RmtSmartLeds, Sk68xxTiming};
+use smart_leds::{SmartLedsWrite, RGB8};
 use esp_radio::esp_now::{
     BROADCAST_ADDRESS, EspNowManager, EspNowReceiver, EspNowSender, PeerInfo,
 };
@@ -121,16 +125,31 @@ async fn main(spawner: Spawner) -> ! {
 
     // ── ESP-NOW setup ────────────────────────────────────────────────────────
 
-    let controller = mk_static!(
-        esp_radio::Controller<'static>,
-        esp_radio::init().unwrap()
-    );
-    let (_wifi_controller, interfaces) =
-        esp_radio::wifi::new(controller, peripherals.WIFI, Default::default()).unwrap();
+    let esp_radio_ctrl = &*mk_static!(esp_radio::Controller<'static>, esp_radio::init().unwrap());
+
+    let (mut wifi_controller, interfaces) =
+        esp_radio::wifi::new(esp_radio_ctrl, peripherals.WIFI, Default::default()).unwrap();
+    wifi_controller.set_mode(esp_radio::wifi::WifiMode::Sta).unwrap();
+    wifi_controller.start().unwrap();
 
     let esp_now = interfaces.esp_now;
     esp_now.set_channel(DEFAULT_CHANNEL).unwrap();
     info!("ESP-NOW v{} on channel {}", esp_now.version().unwrap(), DEFAULT_CHANNEL);
+
+    // ── LED setup (SK6812 on GPIO2 via RMT) ─────────────────────────────────
+
+    let rmt = Rmt::new(peripherals.RMT, Rate::from_mhz(80)).unwrap();
+    let mut led = RmtSmartLeds::<
+        { buffer_size::<RGB8>(1) },
+        _,
+        RGB8,
+        color_order::Grb,
+        Sk68xxTiming,
+    >::new(rmt.channel0, peripherals.GPIO2)
+    .unwrap();
+
+    // Blue = alive, booting.
+    let _ = led.write(core::iter::once(RGB8 { r: 0, g: 0, b: 255 }));
 
     let (manager, sender, receiver) = esp_now.split();
     let manager = mk_static!(EspNowManager<'static>, manager);
@@ -144,8 +163,10 @@ async fn main(spawner: Spawner) -> ! {
     let motor_result = mk_static!(Signal<NoopRawMutex, MotorResult>, Signal::new());
     let rx_mac = mk_static!(Mutex<NoopRawMutex, Option<[u8; 6]>>, Mutex::new(None));
 
+    let paired_signal = mk_static!(Signal<NoopRawMutex, ()>, Signal::new());
+
     spawner.spawn(discovery_task(sender, rx_mac)).ok();
-    spawner.spawn(listener_task(manager, receiver, rx_mac, motor_cmd)).ok();
+    spawner.spawn(listener_task(manager, receiver, rx_mac, motor_cmd, paired_signal)).ok();
     spawner.spawn(responder_task(sender, rx_mac, motor_result)).ok();
 
     // Motor task uses the concrete motor type (feature-gated).
@@ -168,6 +189,11 @@ async fn main(spawner: Spawner) -> ! {
 
     info!("Turntable controller ready, discovering RX...");
 
+    // Wait for RX pairing, then turn LED green.
+    paired_signal.wait().await;
+    info!("Paired with RX — LED green");
+    let _ = led.write(core::iter::once(RGB8 { r: 0, g: 255, b: 0 }));
+
     // Main loop does nothing — all work is in tasks.
     loop {
         Timer::after(Duration::from_secs(60)).await;
@@ -176,22 +202,20 @@ async fn main(spawner: Spawner) -> ! {
 
 // ── Tasks ────────────────────────────────────────────────────────────────────
 
-/// Broadcasts discovery beacons until RX pairs with us.
+/// Broadcasts discovery beacons. Slows down after pairing but keeps sending
+/// so that RX can discover us even if it boots later.
 #[embassy_executor::task]
 async fn discovery_task(
     sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
     rx_mac: &'static Mutex<NoopRawMutex, Option<[u8; 6]>>,
 ) {
-    let mut ticker = Ticker::every(BEACON_INTERVAL);
     let mut buf = [0u8; proto::MAX_MSG_SIZE];
 
     loop {
-        ticker.next().await;
-
         if rx_mac.lock().await.is_some() {
-            // Already paired, slow down beaconing.
             Timer::after(Duration::from_secs(10)).await;
-            continue;
+        } else {
+            Timer::after(BEACON_INTERVAL).await;
         }
 
         let beacon = EspnowMessage::Hello(proto::HelloBeacon {
@@ -213,6 +237,7 @@ async fn listener_task(
     mut receiver: EspNowReceiver<'static>,
     rx_mac: &'static Mutex<NoopRawMutex, Option<[u8; 6]>>,
     motor_cmd: &'static Signal<NoopRawMutex, MotorCmd>,
+    paired_signal: &'static Signal<NoopRawMutex, ()>,
 ) {
     loop {
         let received = receiver.receive_async().await;
@@ -242,6 +267,7 @@ async fn listener_task(
                     }
 
                     *rx_mac.lock().await = Some(src);
+                    paired_signal.signal(());
                 }
             }
             Ok(EspnowMessage::PairConfirm(confirm)) if confirm.role == Role::Rx => {
@@ -258,6 +284,7 @@ async fn listener_task(
                         .unwrap();
                 }
                 *rx_mac.lock().await = Some(src);
+                paired_signal.signal(());
             }
             Ok(EspnowMessage::TurntableCmd(cmd)) => {
                 // Verify message is from our paired RX.

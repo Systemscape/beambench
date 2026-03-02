@@ -11,17 +11,18 @@
 use defmt::info;
 use embassy_executor::Spawner;
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, mutex::Mutex, signal::Signal};
-use embassy_time::{Duration, Ticker, Timer};
+use embassy_time::{Duration, Timer};
 use esp_alloc as _;
 use esp_backtrace as _;
 use esp_hal::{
-    clock::CpuClock,
-    interrupt::software::SoftwareInterruptControl,
+    clock::CpuClock, interrupt::software::SoftwareInterruptControl, rmt::Rmt, time::Rate,
     timer::timg::TimerGroup,
 };
+use esp_hal_smartled::{buffer_size, color_order, RmtSmartLeds, Sk68xxTiming};
 use esp_radio::esp_now::{
-    BROADCAST_ADDRESS, EspNowManager, EspNowReceiver, EspNowSender, PeerInfo,
+    EspNowManager, EspNowReceiver, EspNowSender, PeerInfo, BROADCAST_ADDRESS,
 };
+use smart_leds::{SmartLedsWrite, RGB8};
 
 use beambench_protocol::{self as proto, EspnowMessage, Role};
 
@@ -84,16 +85,37 @@ async fn main(spawner: Spawner) -> ! {
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0, sw_int.software_interrupt0);
 
-    let controller = mk_static!(
-        esp_radio::Controller<'static>,
-        esp_radio::init().unwrap()
-    );
-    let (_wifi_controller, interfaces) =
-        esp_radio::wifi::new(controller, peripherals.WIFI, Default::default()).unwrap();
+    // ── ESP-NOW setup ────────────────────────────────────────────────────────
+
+    let esp_radio_ctrl = &*mk_static!(esp_radio::Controller<'static>, esp_radio::init().unwrap());
+
+    let wifi = peripherals.WIFI;
+    let (mut controller, interfaces) =
+        esp_radio::wifi::new(&esp_radio_ctrl, wifi, Default::default()).unwrap();
+    controller.set_mode(esp_radio::wifi::WifiMode::Sta).unwrap();
+    controller.start().unwrap();
 
     let esp_now = interfaces.esp_now;
-    esp_now.set_channel(DEFAULT_CHANNEL).unwrap();
-    info!("ESP-NOW v{} on channel {}", esp_now.version().unwrap(), DEFAULT_CHANNEL);
+    esp_now.set_channel(11).unwrap();
+
+    info!(
+        "ESP-NOW v{} on channel {}",
+        esp_now.version().unwrap(),
+        DEFAULT_CHANNEL
+    );
+
+    // ── LED setup (SK6812 on GPIO2 via RMT) ─────────────────────────────────
+
+    let rmt = Rmt::new(peripherals.RMT, Rate::from_mhz(80)).unwrap();
+    let mut led =
+        RmtSmartLeds::<{ buffer_size::<RGB8>(1) }, _, RGB8, color_order::Grb, Sk68xxTiming>::new(
+            rmt.channel0,
+            peripherals.GPIO2,
+        )
+        .unwrap();
+
+    // Blue = alive, booting.
+    let _ = led.write(core::iter::once(RGB8 { r: 0, g: 0, b: 255 }));
 
     let (manager, sender, receiver) = esp_now.split();
     let manager = mk_static!(EspNowManager<'static>, manager);
@@ -108,7 +130,9 @@ async fn main(spawner: Spawner) -> ! {
     let rssi_signal = mk_static!(Signal<NoopRawMutex, i32>, Signal::new());
 
     spawner.spawn(discovery_task(sender, state)).ok();
-    spawner.spawn(listener_task(manager, receiver, state, rssi_signal)).ok();
+    spawner
+        .spawn(listener_task(manager, sender, receiver, state, rssi_signal))
+        .ok();
 
     info!("RX coordinator ready, discovering peers...");
 
@@ -121,6 +145,9 @@ async fn main(spawner: Spawner) -> ! {
         Timer::after(Duration::from_millis(500)).await;
     }
 
+    // Green = connected to both TX and turntable.
+    let _ = led.write(core::iter::once(RGB8 { r: 0, g: 255, b: 0 }));
+
     // Main loop: await commands from PC over serial.
     // TODO: Implement USB-serial bridge with postcard+COBS.
     // For now, just log RSSI from received TX packets.
@@ -132,22 +159,20 @@ async fn main(spawner: Spawner) -> ! {
 
 // ── Tasks ────────────────────────────────────────────────────────────────────
 
-/// Broadcasts discovery beacons and sends pair confirmations to discovered peers.
+/// Broadcasts discovery beacons. Slows down after all peers are found but
+/// keeps sending so late-booting peers can still discover us.
 #[embassy_executor::task]
 async fn discovery_task(
     sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
     state: &'static Mutex<NoopRawMutex, RxState>,
 ) {
-    let mut ticker = Ticker::every(BEACON_INTERVAL);
     let mut buf = [0u8; proto::MAX_MSG_SIZE];
 
     loop {
-        ticker.next().await;
-
         if state.lock().await.all_paired() {
-            // All peers found, slow down beaconing (but keep it for reconnection).
             Timer::after(Duration::from_secs(10)).await;
-            continue;
+        } else {
+            Timer::after(BEACON_INTERVAL).await;
         }
 
         let beacon = EspnowMessage::Hello(proto::HelloBeacon {
@@ -166,6 +191,7 @@ async fn discovery_task(
 #[embassy_executor::task]
 async fn listener_task(
     manager: &'static EspNowManager<'static>,
+    sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
     mut receiver: EspNowReceiver<'static>,
     state: &'static Mutex<NoopRawMutex, RxState>,
     rssi_signal: &'static Signal<NoopRawMutex, i32>,
@@ -180,18 +206,16 @@ async fn listener_task(
         let msg: Result<EspnowMessage, _> = proto::deserialize(data);
         match msg {
             Ok(EspnowMessage::Hello(hello)) => {
-                handle_hello(manager, state, &src, &hello).await;
+                handle_hello(manager, sender, state, &src, &hello).await;
             }
-            Ok(EspnowMessage::TurntableResp(resp)) => {
-                match resp {
-                    proto::TurntableResponse::MoveComplete { angle_deg } => {
-                        info!("Turntable reached {}", angle_deg);
-                    }
-                    proto::TurntableResponse::Error { description } => {
-                        info!("Turntable error: {}", description.as_str());
-                    }
+            Ok(EspnowMessage::TurntableResp(resp)) => match resp {
+                proto::TurntableResponse::MoveComplete { angle_deg } => {
+                    info!("Turntable reached {}", angle_deg);
                 }
-            }
+                proto::TurntableResponse::Error { description } => {
+                    info!("Turntable error: {}", description.as_str());
+                }
+            },
             _ => {
                 // Unrecognized payload — likely a TX measurement packet.
                 // Record the RSSI.
@@ -210,6 +234,7 @@ async fn listener_task(
 /// Handle a discovery beacon from TX or turntable.
 async fn handle_hello(
     manager: &'static EspNowManager<'static>,
+    sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
     state: &'static Mutex<NoopRawMutex, RxState>,
     src: &[u8; 6],
     hello: &proto::HelloBeacon,
@@ -227,18 +252,22 @@ async fn handle_hello(
         return;
     }
 
-    info!("Discovered {:?} at {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-        hello.role, src[0], src[1], src[2], src[3], src[4], src[5]);
+    info!(
+        "Discovered {:?} at {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        hello.role, src[0], src[1], src[2], src[3], src[4], src[5]
+    );
 
     // Register as unicast peer.
     if !manager.peer_exists(src) {
-        manager.add_peer(PeerInfo {
-            interface: esp_radio::esp_now::EspNowWifiInterface::Sta,
-            peer_address: *src,
-            lmk: None,
-            channel: None,
-            encrypt: false,
-        }).unwrap();
+        manager
+            .add_peer(PeerInfo {
+                interface: esp_radio::esp_now::EspNowWifiInterface::Sta,
+                peer_address: *src,
+                lmk: None,
+                channel: None,
+                encrypt: false,
+            })
+            .unwrap();
     }
 
     // Update state.
@@ -257,8 +286,12 @@ async fn handle_hello(
         }
     }
 
-    // Send pair confirmation.
-    // TODO: Send PairConfirm unicast to the discovered peer.
-    // This requires access to the sender, which we'd need to pass in.
-    // For now, the peer will detect pairing when it receives a unicast from us.
+    // Send pair confirmation unicast to the discovered peer.
+    let confirm = EspnowMessage::PairConfirm(proto::PairConfirm { role: Role::Rx, mac: [0; 6] });
+    let mut buf = [0u8; proto::MAX_MSG_SIZE];
+    if let Ok(data) = proto::serialize(&confirm, &mut buf) {
+        let mut s = sender.lock().await;
+        let _ = s.send_async(src, data).await;
+        info!("Sent PairConfirm to {:?}", hello.role);
+    }
 }

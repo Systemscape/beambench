@@ -52,6 +52,10 @@ rtt-target = { version = "0.6.2", features = ["defmt"] }
 beambench-protocol = { path = "../protocol", features = ["defmt"] }
 postcard = "1"
 
+# SK6812 LED driver via RMT peripheral
+esp-hal-smartled2 = "0.28.1"
+smart-leds = "0.4.0"
+
 critical-section = "1.2.0"
 
 [profile.dev]

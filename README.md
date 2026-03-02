@@ -174,3 +174,44 @@ The `rx-sim` binary (and `sim` module) simulates the RX board over TCP. It imple
 Used for:
 - Manual UI testing without hardware (`just sim`)
 - Automated integration tests (in-process, random port)
+
+## Phase 2: Wideband Measurements (ADF4351 + AD8318)
+
+Phase 1 uses ESPNOW RSSI (integer dBm, ~30 dB range, 2.4 GHz only). Phase 2 adds dedicated RF hardware for calibrated, wideband measurements at any frequency from 35 MHz to 4.4 GHz.
+
+### Hardware
+
+| Component | Module | Interface | Connected to |
+|-----------|--------|-----------|-------------|
+| ADF4351 | PLL synthesizer breakout (35 MHz – 4.4 GHz) | SPI (CLK, DAT, LE) | TX board (ESP32-C3) |
+| AD8318 | Log detector breakout (1 MHz – 8 GHz, 60 dB range) | Analog voltage → ADC | RX board (ESP32-C3) |
+
+**ADF4351 → TX board wiring:**
+
+| ESP32-C3 | ADF4351 | Function |
+|----------|---------|----------|
+| GPIO4 | CLK | SPI clock |
+| GPIO5 | DAT | SPI data (MOSI) |
+| GPIO6 | LE | Latch enable (CS) |
+| GND | GND | Ground |
+
+**AD8318 → RX board wiring:**
+
+| ESP32-C3 | AD8318 | Function |
+|----------|--------|----------|
+| GPIO2 (ADC) | VOUT (via voltage divider if needed) | Detected RF power |
+| GND | GND | Ground |
+
+### Architecture
+
+ESPNOW remains the command/control channel between boards (discovery, frequency configuration, move commands). The RF measurement path is separate:
+
+```
+TX board → ADF4351 → SMA → antenna (AUT) → air → RX antenna → SMA → AD8318 → ADC → RX board
+```
+
+Both measurement modes coexist: `frequency_hz: None` in sweep config uses Phase 1 ESPNOW RSSI, `frequency_hz: Some(freq)` uses ADF4351 + AD8318.
+
+### Calibration
+
+AD8318 outputs a voltage proportional to input power in dBm (slope ~-24 mV/dB). Initial implementation uses datasheet nominal values. Per-module calibration (slope + intercept) can be added later for ±1 dB accuracy.

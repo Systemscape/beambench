@@ -2,14 +2,14 @@
 
 default:
     just --list
-    
+
 # Build firmware
 build:
     cargo build --release
 
 # Build and flash to connected board via probe-rs
 flash:
-    cargo run --release
+    cargo run
 
 # Check without flashing
 check:
