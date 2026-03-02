@@ -626,19 +626,19 @@ async fn run_sweep_inner(
         return Err(desc);
     }
 
-    // Iterate through angles.
-    let mut angle = cmd.start_deg;
-    let going_forward = cmd.stop_deg >= cmd.start_deg;
+    // Use integer step counting to avoid floating-point accumulation errors.
+    // ceil() ensures we always have enough steps to reach stop_deg.
+    let range = cmd.stop_deg - cmd.start_deg;
+    let going_forward = range >= 0.0;
+    let abs_range = if going_forward { range } else { -range };
+    let sign: f32 = if going_forward { 1.0 } else { -1.0 };
 
-    loop {
-        // Bounds check.
-        if going_forward && angle > cmd.stop_deg + f32::EPSILON {
-            break;
-        }
-        if !going_forward && angle < cmd.stop_deg - f32::EPSILON {
-            break;
-        }
+    // Manual ceil to avoid libm dependency: floor + 1 if fractional part > tiny threshold.
+    let n = abs_range / cmd.step_deg;
+    let floor_n = n as u32;
+    let num_steps = if n - floor_n as f32 > 0.001 { floor_n + 1 } else { floor_n };
 
+    for i in 0..=num_steps {
         // Check for stop signal.
         if stop_signal.signaled() {
             let mut desc = heapless::String::new();
@@ -646,8 +646,17 @@ async fn run_sweep_inner(
             return Err(desc);
         }
 
+        // Compute angle from step index (avoids accumulation drift).
+        // Clamp to stop_deg so the final point lands exactly on the endpoint.
+        let raw_angle = cmd.start_deg + i as f32 * cmd.step_deg * sign;
+        let angle = if going_forward {
+            if raw_angle > cmd.stop_deg { cmd.stop_deg } else { raw_angle }
+        } else {
+            if raw_angle < cmd.stop_deg { cmd.stop_deg } else { raw_angle }
+        };
+
         // Send MoveTo command.
-        info!("Sweep: moving to {}°", angle);
+        info!("Sweep: moving to {}° (step {}/{})", angle, i + 1, num_steps + 1);
         turntable_resp_signal.reset();
         send_turntable_cmd(sender, state, proto::TurntableCommand::MoveTo { angle_deg: angle }).await;
 
@@ -680,13 +689,6 @@ async fn run_sweep_inner(
             rssi_dbm: 0.0,
             sample_count: 0,
         }).await;
-
-        // Advance angle.
-        if going_forward {
-            angle += cmd.step_deg;
-        } else {
-            angle -= cmd.step_deg;
-        }
     }
 
     Ok(())
