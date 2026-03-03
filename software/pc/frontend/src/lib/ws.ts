@@ -34,7 +34,8 @@ export type WsCommand =
 	| { type: 'ListPorts' }
 	| { type: 'Connect'; port: string }
 	| { type: 'Disconnect' }
-	| { type: 'ExportCsv' };
+	| { type: 'ExportCsv' }
+	| { type: 'ReturnHome' };
 
 export function createWsConnection(
 	onEvent: (event: WsEvent) => void,

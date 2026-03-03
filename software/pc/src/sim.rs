@@ -99,6 +99,9 @@ pub async fn handle_connection(stream: tokio::net::TcpStream) {
                     stop_flag.notify_one();
                 }
             }
+            PcToRx::ReturnHome => {
+                // Sim: no motor to move, ignore.
+            }
         }
     }
 }

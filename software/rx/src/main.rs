@@ -10,7 +10,12 @@
 
 use defmt::info;
 use embassy_executor::Spawner;
-use embassy_sync::{blocking_mutex::raw::NoopRawMutex, channel::Channel, mutex::Mutex, signal::Signal};
+use embassy_sync::{
+    blocking_mutex::raw::NoopRawMutex,
+    channel::{Channel, Receiver, Sender},
+    mutex::Mutex,
+    signal::Signal,
+};
 use embassy_futures::select::{Either, select};
 use embassy_time::{Duration, Timer, with_timeout};
 use embedded_io_async::{Read, Write};
@@ -93,7 +98,7 @@ struct SweepCmd {
     start_deg: f32,
     stop_deg: f32,
     step_deg: f32,
-    _samples_per_angle: u16, // Phase B: used for RSSI averaging
+    samples_per_angle: u16,
 }
 
 // ── Entry point ──────────────────────────────────────────────────────────────
@@ -166,6 +171,7 @@ async fn main(spawner: Spawner) -> ! {
         Mutex::<NoopRawMutex, _>::new(RxState::new())
     );
     let rssi_signal = mk_static!(Signal<NoopRawMutex, i32>, Signal::new());
+    let rssi_channel = mk_static!(Channel::<NoopRawMutex, i32, 64>, Channel::new());
     let sweep_cmd_ch = mk_static!(Channel::<NoopRawMutex, SweepCmd, 1>, Channel::new());
     let turntable_resp_signal = mk_static!(
         Signal<NoopRawMutex, proto::TurntableResponse>,
@@ -175,7 +181,7 @@ async fn main(spawner: Spawner) -> ! {
 
     spawner.spawn(discovery_task(sender, state)).ok();
     spawner
-        .spawn(listener_task(manager, sender, receiver, state, rssi_signal, led_signal, turntable_resp_signal))
+        .spawn(listener_task(manager, sender, receiver, state, rssi_signal, rssi_channel.sender(), led_signal, turntable_resp_signal))
         .ok();
     spawner.spawn(serial_rx_task(usb_rx, state, serial_resp_ch.sender(), sweep_cmd_ch.sender(), stop_signal, sender)).ok();
     spawner.spawn(serial_tx_task(usb_tx, serial_resp_ch.receiver())).ok();
@@ -183,6 +189,7 @@ async fn main(spawner: Spawner) -> ! {
         sender, state, turntable_resp_signal,
         sweep_cmd_ch.receiver(), stop_signal,
         serial_resp_ch.sender(), led_signal,
+        rssi_channel.receiver(),
     )).ok();
 
     info!("RX coordinator ready, discovering peers...");
@@ -265,6 +272,7 @@ async fn listener_task(
     mut receiver: EspNowReceiver<'static>,
     state: &'static Mutex<NoopRawMutex, RxState>,
     rssi_signal: &'static Signal<NoopRawMutex, i32>,
+    rssi_ch_tx: Sender<'static, NoopRawMutex, i32, 64>,
     led_signal: &'static Signal<NoopRawMutex, LedState>,
     turntable_resp_signal: &'static Signal<NoopRawMutex, proto::TurntableResponse>,
 ) {
@@ -317,6 +325,7 @@ async fn listener_task(
                 };
                 if is_tx {
                     rssi_signal.signal(rssi);
+                    let _ = rssi_ch_tx.try_send(rssi);
 
                     // Start blinking on first RSSI packet.
                     let now = embassy_time::Instant::now().as_millis();
@@ -491,7 +500,7 @@ async fn handle_serial_cmd(
                 start_deg,
                 stop_deg,
                 step_deg,
-                _samples_per_angle: samples_per_angle,
+                samples_per_angle,
             }).await;
         }
         PcToRx::Stop => {
@@ -499,6 +508,10 @@ async fn handle_serial_cmd(
             stop_signal.signal(());
             // Also send immediate Stop to turntable for fast halt.
             send_turntable_cmd(sender, state, proto::TurntableCommand::Stop).await;
+        }
+        PcToRx::ReturnHome => {
+            info!("ReturnHome: moving to 0°");
+            send_turntable_cmd(sender, state, proto::TurntableCommand::MoveTo { angle_deg: 0.0 }).await;
         }
         PcToRx::ConfigureTx { channel, tx_power_dbm, packet_rate_hz } => {
             send_tx_cmd(sender, state, proto::TxCommand::Configure {
@@ -556,6 +569,43 @@ async fn send_tx_cmd(
     }
 }
 
+// ── RSSI collection ─────────────────────────────────────────────────────────
+
+const RSSI_COLLECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Collect RSSI samples from the channel and return the average.
+///
+/// This function is intentionally decoupled from the RSSI source — any task
+/// that feeds `i32` values into the channel works (ESPNOW packet RSSI today,
+/// spectrum-analyzer IC tomorrow).
+async fn collect_rssi(
+    rssi_rx: &Receiver<'static, NoopRawMutex, i32, 64>,
+    samples_requested: u16,
+    timeout: Duration,
+) -> (f32, u16) {
+    // Drain stale samples that arrived before this measurement window.
+    while rssi_rx.try_receive().is_ok() {}
+
+    let mut sum: i64 = 0;
+    let mut count: u16 = 0;
+
+    for _ in 0..samples_requested {
+        match with_timeout(timeout, rssi_rx.receive()).await {
+            Ok(rssi) => {
+                sum += rssi as i64;
+                count += 1;
+            }
+            Err(_) => break, // Timeout waiting for next sample.
+        }
+    }
+
+    if count == 0 {
+        (0.0, 0)
+    } else {
+        (sum as f32 / count as f32, count)
+    }
+}
+
 // ── Sweep task ──────────────────────────────────────────────────────────────
 
 /// Pre-spawned sweep coordinator. Waits for SweepCmd on the channel,
@@ -565,10 +615,11 @@ async fn sweep_task(
     sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
     state: &'static Mutex<NoopRawMutex, RxState>,
     turntable_resp_signal: &'static Signal<NoopRawMutex, proto::TurntableResponse>,
-    sweep_cmd_rx: embassy_sync::channel::Receiver<'static, NoopRawMutex, SweepCmd, 1>,
+    sweep_cmd_rx: Receiver<'static, NoopRawMutex, SweepCmd, 1>,
     stop_signal: &'static Signal<NoopRawMutex, ()>,
-    resp_tx: embassy_sync::channel::Sender<'static, NoopRawMutex, RxToPc, 8>,
+    resp_tx: Sender<'static, NoopRawMutex, RxToPc, 8>,
     led_signal: &'static Signal<NoopRawMutex, LedState>,
+    rssi_rx: Receiver<'static, NoopRawMutex, i32, 64>,
 ) {
     loop {
         let cmd = sweep_cmd_rx.receive().await;
@@ -585,9 +636,15 @@ async fn sweep_task(
         );
         led_signal.signal(LedState::Blink { color: COLOR_AMBER, period_ms: 500 });
 
+        // Tell TX board to start transmitting so we can measure RSSI.
+        send_tx_cmd(sender, state, proto::TxCommand::StartTransmit).await;
+
         let result = run_sweep_inner(
-            &cmd, sender, state, turntable_resp_signal, stop_signal, &resp_tx,
+            &cmd, sender, state, turntable_resp_signal, stop_signal, &resp_tx, &rssi_rx,
         ).await;
+
+        // Always stop TX — cleanup on success, error, and abort paths.
+        send_tx_cmd(sender, state, proto::TxCommand::StopTransmit).await;
 
         match result {
             Ok(()) => {
@@ -605,14 +662,15 @@ async fn sweep_task(
     }
 }
 
-/// Phase A sweep: step turntable through all angles, send DataPoints with dummy RSSI.
+/// Execute a sweep: step turntable through all angles, collect RSSI at each, send DataPoints.
 async fn run_sweep_inner(
     cmd: &SweepCmd,
     sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
     state: &'static Mutex<NoopRawMutex, RxState>,
     turntable_resp_signal: &'static Signal<NoopRawMutex, proto::TurntableResponse>,
     stop_signal: &'static Signal<NoopRawMutex, ()>,
-    resp_tx: &embassy_sync::channel::Sender<'static, NoopRawMutex, RxToPc, 8>,
+    resp_tx: &Sender<'static, NoopRawMutex, RxToPc, 8>,
+    rssi_rx: &Receiver<'static, NoopRawMutex, i32, 64>,
 ) -> Result<(), heapless::String<128>> {
     // Check turntable is paired.
     if !state.lock().await.turntable_paired {
@@ -673,11 +731,13 @@ async fn run_sweep_inner(
             }
         }
 
-        // Phase A: send DataPoint with dummy RSSI.
+        // Collect real RSSI samples and report.
+        let (rssi_dbm, sample_count) = collect_rssi(rssi_rx, cmd.samples_per_angle, RSSI_COLLECT_TIMEOUT).await;
+        info!("  angle={}° rssi={} dBm ({} samples)", angle, rssi_dbm, sample_count);
         resp_tx.send(RxToPc::DataPoint {
             angle_deg: angle,
-            rssi_dbm: 0.0,
-            sample_count: 0,
+            rssi_dbm,
+            sample_count,
         }).await;
     }
 

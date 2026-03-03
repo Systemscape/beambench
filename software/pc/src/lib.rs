@@ -75,6 +75,7 @@ pub enum WsCommand {
     Connect { port: String },
     Disconnect,
     ExportCsv,
+    ReturnHome,
 }
 
 impl SweepConfig {

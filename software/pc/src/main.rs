@@ -386,6 +386,15 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
         WsCommand::ExportCsv => {
             // CSV export is available via REST endpoint.
         }
+        WsCommand::ReturnHome => {
+            let serial = state.serial.lock().await;
+            if let Some(ref handle) = *serial {
+                let _ = handle.tx.send(beambench_protocol::PcToRx::ReturnHome).await;
+                let _ = state.ws_tx.send(WsEvent::Log {
+                    message: "Returning to home position...".to_string(),
+                });
+            }
+        }
     }
 }
 

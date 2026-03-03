@@ -148,6 +148,8 @@ pub enum PcToRx {
     Stop,
     /// Request status from RX.
     QueryStatus,
+    /// Return turntable to home (0°) position.
+    ReturnHome,
 }
 
 /// Message from RX board to PC (over USB-serial).

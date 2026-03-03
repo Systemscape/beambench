@@ -5,7 +5,20 @@
 	let plotDiv: HTMLDivElement;
 	let Plotly: typeof import('plotly.js-dist-min');
 
-	let dataPoints: DataPoint[] = $state([]);
+	type Measurement = {
+		id: number;
+		name: string;
+		data: DataPoint[];
+		color: string;
+		visible: boolean;
+	};
+
+	const COLORS = ['#fff', '#4fc3f7', '#ff8a65', '#81c784', '#ce93d8', '#fff176'];
+
+	let measurements: Measurement[] = $state([]);
+	let activeData: DataPoint[] = $state([]);
+	let nextId = $state(1);
+
 	let status: SystemStatus = $state({
 		sweeping: false,
 		tx_connected: false,
@@ -43,11 +56,27 @@
 		});
 	}
 
+	function archiveActive() {
+		if (activeData.length === 0) return;
+		measurements = [
+			...measurements,
+			{
+				id: nextId,
+				name: `Sweep ${nextId}`,
+				data: activeData,
+				color: COLORS[(nextId - 1) % COLORS.length],
+				visible: true
+			}
+		];
+		nextId++;
+		activeData = [];
+	}
+
 	function handleEvent(event: WsEvent) {
 		switch (event.type) {
 			case 'DataPoint':
-				dataPoints = [
-					...dataPoints,
+				activeData = [
+					...activeData,
 					{
 						angle_deg: event.angle_deg,
 						rssi_dbm: event.rssi_dbm,
@@ -58,6 +87,8 @@
 				break;
 			case 'SweepComplete':
 				status = { ...status, sweeping: false };
+				archiveActive();
+				updatePlot();
 				addLog('Sweep complete');
 				break;
 			case 'Status':
@@ -83,17 +114,22 @@
 	}
 
 	$effect(() => {
-		dynamicRangeDb; // track
+		// Track reactive deps to re-render plot
+		dynamicRangeDb;
+		measurements.map((m) => m.visible);
 		updatePlot();
 	});
 
 	function updatePlot() {
 		if (!Plotly || !plotDiv) return;
 
-		const theta = dataPoints.map((d) => d.angle_deg);
+		// Collect all visible data for normalization
+		const allVisible: DataPoint[] = [];
+		for (const m of measurements) {
+			if (m.visible) allVisible.push(...m.data);
+		}
+		allVisible.push(...activeData);
 
-		// Normalize RSSI to positive radial values: 0 = floor (center), dynamicRangeDb = peak (outer edge)
-		let r: number[];
 		let radialaxis: Record<string, unknown> = {
 			title: { text: 'RSSI (dBm)', font: { color: '#888' } },
 			angle: 90,
@@ -103,10 +139,10 @@
 			tickfont: { color: '#666' }
 		};
 
-		if (dataPoints.length > 0) {
-			const maxRssi = Math.max(...dataPoints.map((d) => d.rssi_dbm));
-			const floor = maxRssi - dynamicRangeDb;
-			r = dataPoints.map((d) => Math.max(0, d.rssi_dbm - floor));
+		let floor = 0;
+		if (allVisible.length > 0) {
+			const maxRssi = Math.max(...allVisible.map((d) => d.rssi_dbm));
+			floor = maxRssi - dynamicRangeDb;
 
 			const tickCount = 5;
 			const tickStep = dynamicRangeDb / tickCount;
@@ -119,21 +155,36 @@
 				tickvals,
 				ticktext
 			};
-		} else {
-			r = [];
 		}
 
-		const data = [
-			{
+		// Build one trace per visible measurement + active
+		const traces: Record<string, unknown>[] = [];
+
+		for (const m of measurements) {
+			if (!m.visible) continue;
+			traces.push({
 				type: 'scatterpolar' as const,
 				mode: 'lines+markers' as const,
-				r,
-				theta,
-				name: 'RSSI',
-				line: { color: '#fff', width: 1.5 },
-				marker: { size: 3, color: '#fff' }
-			}
-		];
+				r: m.data.map((d) => Math.max(0, d.rssi_dbm - floor)),
+				theta: m.data.map((d) => d.angle_deg),
+				name: m.name,
+				line: { color: m.color, width: 1.5 },
+				marker: { size: 3, color: m.color }
+			});
+		}
+
+		if (activeData.length > 0) {
+			const activeColor = COLORS[(nextId - 1) % COLORS.length];
+			traces.push({
+				type: 'scatterpolar' as const,
+				mode: 'lines+markers' as const,
+				r: activeData.map((d) => Math.max(0, d.rssi_dbm - floor)),
+				theta: activeData.map((d) => d.angle_deg),
+				name: `Sweep ${nextId} (active)`,
+				line: { color: activeColor, width: 2 },
+				marker: { size: 4, color: activeColor }
+			});
+		}
 
 		const layout = {
 			polar: {
@@ -147,13 +198,14 @@
 					tickfont: { color: '#666' }
 				}
 			},
-			showlegend: false,
+			showlegend: traces.length > 1,
+			legend: { font: { color: '#888' } },
 			paper_bgcolor: '#1a1a1a',
 			plot_bgcolor: '#1a1a1a',
 			margin: { t: 40, b: 40, l: 40, r: 40 }
 		};
 
-		Plotly.react(plotDiv, data, layout, { responsive: true });
+		Plotly.react(plotDiv, traces, layout, { responsive: true });
 	}
 
 	async function fetchPorts() {
@@ -179,7 +231,7 @@
 	}
 
 	function startSweep() {
-		dataPoints = [];
+		archiveActive();
 		ws?.send({
 			type: 'StartSweep',
 			start_deg: startDeg,
@@ -191,6 +243,27 @@
 
 	function stopSweep() {
 		ws?.send({ type: 'Stop' });
+	}
+
+	function returnHome() {
+		ws?.send({ type: 'ReturnHome' });
+	}
+
+	function toggleMeasurement(id: number) {
+		measurements = measurements.map((m) =>
+			m.id === id ? { ...m, visible: !m.visible } : m
+		);
+		updatePlot();
+	}
+
+	function deleteMeasurement(id: number) {
+		measurements = measurements.filter((m) => m.id !== id);
+		updatePlot();
+	}
+
+	function clearAllMeasurements() {
+		measurements = [];
+		updatePlot();
 	}
 
 	onMount(async () => {
@@ -279,15 +352,19 @@
 					<input id="samples" type="number" bind:value={samplesPerAngle} min="1" />
 				</div>
 				<div class="button-row">
-					{#if status.sweeping}
-						<button class="danger" onclick={stopSweep}>Stop</button>
-					{:else}
-						<button onclick={startSweep} disabled={!status.serial_connected}>
-							Start Sweep
-						</button>
-					{/if}
+					<button onclick={startSweep} disabled={!status.serial_connected || status.sweeping}>
+						Start Sweep
+					</button>
 				</div>
-				<p class="info">{dataPoints.length} data points</p>
+				<div class="button-row connect-row">
+					<button class="danger" onclick={stopSweep} disabled={!status.serial_connected}>
+						Stop
+					</button>
+					<button class="secondary" onclick={returnHome} disabled={!status.serial_connected || status.sweeping}>
+						Home
+					</button>
+				</div>
+				<p class="info">{activeData.length} data points</p>
 			</section>
 
 			<section>
@@ -298,10 +375,31 @@
 				</div>
 			</section>
 
+			{#if measurements.length > 0}
+				<section class="measurements-section">
+					<div class="measurements-header">
+						<h2>Measurements</h2>
+						<button class="small-btn danger" onclick={clearAllMeasurements}>Clear All</button>
+					</div>
+					<div class="measurements-list">
+						{#each measurements as m (m.id)}
+							<div class="measurement-row">
+								<label class="measurement-toggle">
+									<input type="checkbox" checked={m.visible} onchange={() => toggleMeasurement(m.id)} />
+									<span class="color-dot" style="background: {m.color}"></span>
+									{m.name}
+								</label>
+								<button class="icon-btn" onclick={() => deleteMeasurement(m.id)}>&times;</button>
+							</div>
+						{/each}
+					</div>
+				</section>
+			{/if}
+
 			<section>
 				<h2>Export</h2>
 				<a href="/api/export/csv" download="beambench.csv">
-					<button disabled={dataPoints.length === 0}>Download CSV</button>
+					<button disabled={activeData.length === 0 && measurements.length === 0}>Download CSV</button>
 				</a>
 			</section>
 
@@ -521,5 +619,71 @@
 
 	.log-ts {
 		color: #555;
+	}
+
+	.measurements-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		margin-bottom: 0.5rem;
+	}
+
+	.measurements-header h2 {
+		margin: 0;
+	}
+
+	.measurements-list {
+		max-height: 150px;
+		overflow-y: auto;
+	}
+
+	.measurement-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: 0.25rem 0;
+	}
+
+	.measurement-toggle {
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+		font-size: 0.8rem;
+		color: #bbb;
+		cursor: pointer;
+	}
+
+	.measurement-toggle input[type='checkbox'] {
+		width: auto;
+		margin: 0;
+	}
+
+	.color-dot {
+		display: inline-block;
+		width: 8px;
+		height: 8px;
+		border-radius: 50%;
+		flex-shrink: 0;
+	}
+
+	.small-btn {
+		padding: 0.2rem 0.5rem;
+		font-size: 0.7rem;
+		width: auto;
+	}
+
+	.icon-btn {
+		padding: 0.1rem 0.4rem;
+		font-size: 1rem;
+		width: auto;
+		line-height: 1;
+		color: #666;
+		border: none;
+		background: transparent;
+	}
+
+	.icon-btn:hover {
+		color: #e53935;
+		background: transparent;
 	}
 </style>
