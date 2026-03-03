@@ -20,6 +20,9 @@
 	let logEntries: { ts: string; msg: string }[] = $state([]);
 	let logDiv: HTMLDivElement;
 
+	// Plot settings
+	let dynamicRangeDb = $state(40);
+
 	// Sweep config
 	let startDeg = $state(0);
 	let stopDeg = $state(360);
@@ -79,11 +82,46 @@
 		}
 	}
 
+	$effect(() => {
+		dynamicRangeDb; // track
+		updatePlot();
+	});
+
 	function updatePlot() {
 		if (!Plotly || !plotDiv) return;
 
 		const theta = dataPoints.map((d) => d.angle_deg);
-		const r = dataPoints.map((d) => d.rssi_dbm);
+
+		// Normalize RSSI to positive radial values: 0 = floor (center), dynamicRangeDb = peak (outer edge)
+		let r: number[];
+		let radialaxis: Record<string, unknown> = {
+			title: { text: 'RSSI (dBm)', font: { color: '#888' } },
+			angle: 90,
+			tickangle: 90,
+			gridcolor: '#2a2a2a',
+			linecolor: '#333',
+			tickfont: { color: '#666' }
+		};
+
+		if (dataPoints.length > 0) {
+			const maxRssi = Math.max(...dataPoints.map((d) => d.rssi_dbm));
+			const floor = maxRssi - dynamicRangeDb;
+			r = dataPoints.map((d) => Math.max(0, d.rssi_dbm - floor));
+
+			const tickCount = 5;
+			const tickStep = dynamicRangeDb / tickCount;
+			const tickvals = Array.from({ length: tickCount + 1 }, (_, i) => i * tickStep);
+			const ticktext = tickvals.map((v) => `${Math.round(floor + v)}`);
+
+			radialaxis = {
+				...radialaxis,
+				range: [0, dynamicRangeDb],
+				tickvals,
+				ticktext
+			};
+		} else {
+			r = [];
+		}
 
 		const data = [
 			{
@@ -100,14 +138,7 @@
 		const layout = {
 			polar: {
 				bgcolor: '#1a1a1a',
-				radialaxis: {
-					title: { text: 'RSSI (dBm)', font: { color: '#888' } },
-					angle: 90,
-					tickangle: 90,
-					gridcolor: '#2a2a2a',
-					linecolor: '#333',
-					tickfont: { color: '#666' }
-				},
+				radialaxis,
 				angularaxis: {
 					direction: 'clockwise' as const,
 					period: 360,
@@ -257,6 +288,14 @@
 					{/if}
 				</div>
 				<p class="info">{dataPoints.length} data points</p>
+			</section>
+
+			<section>
+				<h2>Plot</h2>
+				<div class="field">
+					<label for="dynrange">Dynamic range (dB)</label>
+					<input id="dynrange" type="number" bind:value={dynamicRangeDb} min="10" max="80" step="5" />
+				</div>
 			</section>
 
 			<section>
