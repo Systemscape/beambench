@@ -12,7 +12,7 @@ use defmt::info;
 use embassy_executor::Spawner;
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, channel::Channel, mutex::Mutex, signal::Signal};
 use embassy_futures::select::{Either, select};
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Timer, with_timeout};
 use embedded_io_async::{Read, Write};
 use esp_alloc as _;
 use esp_backtrace as _;
@@ -212,14 +212,14 @@ async fn main(spawner: Spawner) -> ! {
                 let half = Duration::from_millis(period_ms / 2);
                 loop {
                     let _ = led.write(core::iter::once(color));
-                    match select(led_signal.wait(), Timer::after(half)).await {
-                        Either::First(new) => { led_state = new; break; }
-                        Either::Second(_) => {}
+                    match with_timeout(half, led_signal.wait()).await {
+                        Ok(new) => { led_state = new; break; }
+                        Err(_) => {}
                     }
                     let _ = led.write(core::iter::once(COLOR_OFF));
-                    match select(led_signal.wait(), Timer::after(half)).await {
-                        Either::First(new) => { led_state = new; break; }
-                        Either::Second(_) => {}
+                    match with_timeout(half, led_signal.wait()).await {
+                        Ok(new) => { led_state = new; break; }
+                        Err(_) => {}
                     }
                 }
             }
@@ -274,14 +274,9 @@ async fn listener_task(
     loop {
         // If activity LED is on, check for timeout (2 seconds without RSSI).
         let received = if activity_active {
-            match select(
-                receiver.receive_async(),
-                Timer::after(Duration::from_secs(2)),
-            )
-            .await
-            {
-                Either::First(r) => r,
-                Either::Second(_) => {
+            match with_timeout(Duration::from_secs(2), receiver.receive_async()).await {
+                Ok(r) => r,
+                Err(_) => {
                     // No RSSI for 2s — go back to green.
                     activity_active = false;
                     led_signal.signal(LedState::Solid(COLOR_GREEN));
@@ -661,22 +656,17 @@ async fn run_sweep_inner(
         send_turntable_cmd(sender, state, proto::TurntableCommand::MoveTo { angle_deg: angle }).await;
 
         // Wait for turntable response with 30s timeout.
-        let resp = select(
-            turntable_resp_signal.wait(),
-            Timer::after(Duration::from_secs(30)),
-        ).await;
-
-        match resp {
-            Either::First(proto::TurntableResponse::MoveComplete { .. }) => {
+        match with_timeout(Duration::from_secs(30), turntable_resp_signal.wait()).await {
+            Ok(proto::TurntableResponse::MoveComplete { .. }) => {
                 // Turntable reached target angle.
             }
-            Either::First(proto::TurntableResponse::Error { description }) => {
+            Ok(proto::TurntableResponse::Error { description }) => {
                 let mut desc = heapless::String::<128>::new();
                 let _ = desc.push_str("Turntable error: ");
                 let _ = desc.push_str(description.as_str());
                 return Err(desc);
             }
-            Either::Second(_) => {
+            Err(_) => {
                 let mut desc = heapless::String::new();
                 let _ = desc.push_str("Turntable move timeout (30s)");
                 return Err(desc);
@@ -695,16 +685,12 @@ async fn run_sweep_inner(
     info!("Sweep done, returning to {}°", cmd.start_deg);
     turntable_resp_signal.reset();
     send_turntable_cmd(sender, state, proto::TurntableCommand::MoveTo { angle_deg: cmd.start_deg }).await;
-    let resp = select(
-        turntable_resp_signal.wait(),
-        Timer::after(Duration::from_secs(30)),
-    ).await;
-    match resp {
-        Either::First(proto::TurntableResponse::MoveComplete { .. }) => {}
-        Either::First(proto::TurntableResponse::Error { description }) => {
+    match with_timeout(Duration::from_secs(30), turntable_resp_signal.wait()).await {
+        Ok(proto::TurntableResponse::MoveComplete { .. }) => {}
+        Ok(proto::TurntableResponse::Error { description }) => {
             info!("Return-to-start error: {}", description.as_str());
         }
-        Either::Second(_) => {
+        Err(_) => {
             info!("Return-to-start timeout");
         }
     }
