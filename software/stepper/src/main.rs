@@ -90,9 +90,9 @@ enum LedState {
     Blink { color: RGB8, period_ms: u64 },
 }
 
-const COLOR_BLUE: RGB8 = RGB8 { r: 0, g: 0, b: 255 };
-const COLOR_GREEN: RGB8 = RGB8 { r: 0, g: 255, b: 0 };
-const COLOR_AMBER: RGB8 = RGB8 { r: 255, g: 80, b: 0 };
+const COLOR_BLUE: RGB8 = RGB8 { r: 0, g: 0, b: 20 };
+const COLOR_GREEN: RGB8 = RGB8 { r: 0, g: 20, b: 0 };
+const COLOR_AMBER: RGB8 = RGB8 { r: 20, g: 6, b: 0 };
 const COLOR_OFF: RGB8 = RGB8 { r: 0, g: 0, b: 0 };
 
 // Re-export stepper math from protocol crate.

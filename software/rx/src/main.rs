@@ -10,21 +10,24 @@
 
 use defmt::info;
 use embassy_executor::Spawner;
+use embassy_futures::select::{select, Either};
 use embassy_sync::{
     blocking_mutex::raw::NoopRawMutex,
     channel::{Channel, Receiver, Sender},
     mutex::Mutex,
     signal::Signal,
 };
-use embassy_futures::select::{Either, select};
-use embassy_time::{Duration, Timer, with_timeout};
+use embassy_time::{with_timeout, Duration, Instant, Timer};
 use embedded_io_async::{Read, Write};
 use esp_alloc as _;
 use esp_backtrace as _;
 use esp_hal::{
-    clock::CpuClock, interrupt::software::SoftwareInterruptControl, rmt::Rmt, time::Rate,
+    clock::CpuClock,
+    interrupt::software::SoftwareInterruptControl,
+    rmt::Rmt,
+    time::Rate,
     timer::timg::TimerGroup,
-    usb_serial_jtag::{UsbSerialJtagRx, UsbSerialJtagTx, UsbSerialJtag},
+    usb_serial_jtag::{UsbSerialJtag, UsbSerialJtagRx, UsbSerialJtagTx},
     Async,
 };
 use esp_hal_smartled::{buffer_size, color_order, RmtSmartLeds, Sk68xxTiming};
@@ -33,7 +36,7 @@ use esp_radio::esp_now::{
 };
 use smart_leds::{SmartLedsWrite, RGB8};
 
-use beambench_protocol::{self as proto, EspnowMessage, PcToRx, RxToPc, Role};
+use beambench_protocol::{self as proto, EspnowMessage, PcToRx, Role, RxToPc};
 
 #[defmt::panic_handler]
 fn defmt_panic() -> ! {
@@ -54,6 +57,7 @@ macro_rules! mk_static {
 
 const DEFAULT_CHANNEL: u8 = 11;
 const BEACON_INTERVAL: Duration = Duration::from_secs(1);
+const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
 
 // ── State ────────────────────────────────────────────────────────────────────
 
@@ -63,16 +67,20 @@ struct RxState {
     turntable_paired: bool,
     turntable_mac: [u8; 6],
     sweeping: bool,
+    last_tx_seen: Option<Instant>,
+    last_turntable_seen: Option<Instant>,
 }
 
 impl RxState {
-    const fn new() -> Self {
+    fn new() -> Self {
         Self {
             tx_paired: false,
             tx_mac: [0u8; 6],
             turntable_paired: false,
             turntable_mac: [0u8; 6],
             sweeping: false,
+            last_tx_seen: None,
+            last_turntable_seen: None,
         }
     }
 
@@ -88,9 +96,9 @@ enum LedState {
     Blink { color: RGB8, period_ms: u64 },
 }
 
-const COLOR_BLUE: RGB8 = RGB8 { r: 0, g: 0, b: 255 };
-const COLOR_GREEN: RGB8 = RGB8 { r: 0, g: 255, b: 0 };
-const COLOR_AMBER: RGB8 = RGB8 { r: 255, g: 80, b: 0 };
+const COLOR_BLUE: RGB8 = RGB8 { r: 0, g: 0, b: 20 };
+const COLOR_GREEN: RGB8 = RGB8 { r: 0, g: 20, b: 0 };
+const COLOR_AMBER: RGB8 = RGB8 { r: 20, g: 6, b: 0 };
 const COLOR_OFF: RGB8 = RGB8 { r: 0, g: 0, b: 0 };
 
 /// Sweep parameters sent from serial_rx_task to sweep_task.
@@ -155,7 +163,10 @@ async fn main(spawner: Spawner) -> ! {
     let usb_serial = UsbSerialJtag::new(peripherals.USB_DEVICE).into_async();
     let (usb_rx, usb_tx) = usb_serial.split();
     let usb_rx = mk_static!(UsbSerialJtagRx<'static, Async>, usb_rx);
-    let usb_tx = mk_static!(Mutex::<NoopRawMutex, UsbSerialJtagTx<'static, Async>>, Mutex::new(usb_tx));
+    let usb_tx = mk_static!(
+        Mutex::<NoopRawMutex, UsbSerialJtagTx<'static, Async>>,
+        Mutex::new(usb_tx)
+    );
 
     // Channel for RxToPc responses (serial_rx_task and main loop produce, serial_tx_task consumes).
     let serial_resp_ch = mk_static!(Channel::<NoopRawMutex, RxToPc, 8>, Channel::new());
@@ -179,18 +190,46 @@ async fn main(spawner: Spawner) -> ! {
     );
     let stop_signal = mk_static!(Signal<NoopRawMutex, ()>, Signal::new());
 
-    spawner.spawn(discovery_task(sender, state)).ok();
     spawner
-        .spawn(listener_task(manager, sender, receiver, state, rssi_signal, rssi_channel.sender(), led_signal, turntable_resp_signal))
+        .spawn(discovery_task(sender, state, manager, led_signal))
         .ok();
-    spawner.spawn(serial_rx_task(usb_rx, state, serial_resp_ch.sender(), sweep_cmd_ch.sender(), stop_signal, sender)).ok();
-    spawner.spawn(serial_tx_task(usb_tx, serial_resp_ch.receiver())).ok();
-    spawner.spawn(sweep_task(
-        sender, state, turntable_resp_signal,
-        sweep_cmd_ch.receiver(), stop_signal,
-        serial_resp_ch.sender(), led_signal,
-        rssi_channel.receiver(),
-    )).ok();
+    spawner
+        .spawn(listener_task(
+            manager,
+            sender,
+            receiver,
+            state,
+            rssi_signal,
+            rssi_channel.sender(),
+            led_signal,
+            turntable_resp_signal,
+        ))
+        .ok();
+    spawner
+        .spawn(serial_rx_task(
+            usb_rx,
+            state,
+            serial_resp_ch.sender(),
+            sweep_cmd_ch.sender(),
+            stop_signal,
+            sender,
+        ))
+        .ok();
+    spawner
+        .spawn(serial_tx_task(usb_tx, serial_resp_ch.receiver()))
+        .ok();
+    spawner
+        .spawn(sweep_task(
+            sender,
+            state,
+            turntable_resp_signal,
+            sweep_cmd_ch.receiver(),
+            stop_signal,
+            serial_resp_ch.sender(),
+            led_signal,
+            rssi_channel.receiver(),
+        ))
+        .ok();
 
     info!("RX coordinator ready, discovering peers...");
 
@@ -211,8 +250,12 @@ async fn main(spawner: Spawner) -> ! {
                 let _ = led.write(core::iter::once(color));
                 // Wait for either LED state change or RSSI reading.
                 match select(led_signal.wait(), rssi_signal.wait()).await {
-                    Either::First(new) => { led_state = new; }
-                    Either::Second(rssi) => { info!("RSSI: {} dBm", rssi); }
+                    Either::First(new) => {
+                        led_state = new;
+                    }
+                    Either::Second(rssi) => {
+                        info!("RSSI: {} dBm", rssi);
+                    }
                 }
             }
             LedState::Blink { color, period_ms } => {
@@ -220,12 +263,18 @@ async fn main(spawner: Spawner) -> ! {
                 loop {
                     let _ = led.write(core::iter::once(color));
                     match with_timeout(half, led_signal.wait()).await {
-                        Ok(new) => { led_state = new; break; }
+                        Ok(new) => {
+                            led_state = new;
+                            break;
+                        }
                         Err(_) => {}
                     }
                     let _ = led.write(core::iter::once(COLOR_OFF));
                     match with_timeout(half, led_signal.wait()).await {
-                        Ok(new) => { led_state = new; break; }
+                        Ok(new) => {
+                            led_state = new;
+                            break;
+                        }
                         Err(_) => {}
                     }
                 }
@@ -242,6 +291,8 @@ async fn main(spawner: Spawner) -> ! {
 async fn discovery_task(
     sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
     state: &'static Mutex<NoopRawMutex, RxState>,
+    manager: &'static EspNowManager<'static>,
+    led_signal: &'static Signal<NoopRawMutex, LedState>,
 ) {
     let mut buf = [0u8; proto::MAX_MSG_SIZE];
 
@@ -250,6 +301,40 @@ async fn discovery_task(
             Timer::after(Duration::from_secs(10)).await;
         } else {
             Timer::after(BEACON_INTERVAL).await;
+        }
+
+        // Check for stale peers and unpair them.
+        {
+            let mut s = state.lock().await;
+            let now = Instant::now();
+            if s.tx_paired {
+                if let Some(last) = s.last_tx_seen {
+                    if now - last > HEARTBEAT_TIMEOUT {
+                        info!("TX heartbeat timeout, unpairing");
+                        let _ = manager.remove_peer(&s.tx_mac);
+                        s.tx_paired = false;
+                        s.last_tx_seen = None;
+                    }
+                }
+            }
+            if s.turntable_paired {
+                if let Some(last) = s.last_turntable_seen {
+                    if now - last > HEARTBEAT_TIMEOUT {
+                        info!("Turntable heartbeat timeout, unpairing");
+                        let _ = manager.remove_peer(&s.turntable_mac);
+                        s.turntable_paired = false;
+                        s.last_turntable_seen = None;
+                    }
+                }
+            }
+            if !s.all_paired() {
+                led_signal.signal(LedState::Blink {
+                    color: COLOR_BLUE,
+                    period_ms: 500,
+                });
+            } else {
+                led_signal.signal(LedState::Solid(COLOR_GREEN));
+            }
         }
 
         let beacon = EspnowMessage::Hello(proto::HelloBeacon {
@@ -306,6 +391,7 @@ async fn listener_task(
                 handle_hello(manager, sender, state, &src, &hello).await;
             }
             Ok(EspnowMessage::TurntableResp(resp)) => {
+                state.lock().await.last_turntable_seen = Some(Instant::now());
                 match &resp {
                     proto::TurntableResponse::MoveComplete { angle_deg } => {
                         info!("Turntable reached {}", angle_deg);
@@ -320,8 +406,12 @@ async fn listener_task(
                 // Unrecognized payload — likely a TX measurement packet.
                 // Record the RSSI.
                 let is_tx = {
-                    let s = state.lock().await;
-                    s.tx_paired && s.tx_mac == src
+                    let mut s = state.lock().await;
+                    let matched = s.tx_paired && s.tx_mac == src;
+                    if matched {
+                        s.last_tx_seen = Some(Instant::now());
+                    }
+                    matched
                 };
                 if is_tx {
                     rssi_signal.signal(rssi);
@@ -330,7 +420,10 @@ async fn listener_task(
                     // Start blinking on first RSSI packet.
                     let now = embassy_time::Instant::now().as_millis();
                     if !activity_active || now - last_rssi_tick > 1000 {
-                        led_signal.signal(LedState::Blink { color: COLOR_AMBER, period_ms: 200 });
+                        led_signal.signal(LedState::Blink {
+                            color: COLOR_AMBER,
+                            period_ms: 200,
+                        });
                         activity_active = true;
                     }
                     last_rssi_tick = now;
@@ -349,59 +442,80 @@ async fn handle_hello(
     hello: &proto::HelloBeacon,
 ) {
     let already_paired = {
-        let s = state.lock().await;
+        let mut s = state.lock().await;
         match hello.role {
-            Role::Tx => s.tx_paired,
-            Role::Turntable => s.turntable_paired,
+            Role::Tx => {
+                if s.tx_paired {
+                    s.last_tx_seen = Some(Instant::now());
+                    true
+                } else {
+                    false
+                }
+            }
+            Role::Turntable => {
+                if s.turntable_paired {
+                    s.last_turntable_seen = Some(Instant::now());
+                    true
+                } else {
+                    false
+                }
+            }
             Role::Rx => return, // Ignore other RX boards.
         }
     };
 
-    if already_paired {
-        return;
-    }
+    if !already_paired {
+        info!(
+            "Discovered {:?} at {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            hello.role, src[0], src[1], src[2], src[3], src[4], src[5]
+        );
 
-    info!(
-        "Discovered {:?} at {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-        hello.role, src[0], src[1], src[2], src[3], src[4], src[5]
-    );
+        // Register as unicast peer.
+        if !manager.peer_exists(src) {
+            manager
+                .add_peer(PeerInfo {
+                    interface: esp_radio::esp_now::EspNowWifiInterface::Sta,
+                    peer_address: *src,
+                    lmk: None,
+                    channel: None,
+                    encrypt: false,
+                })
+                .unwrap();
+        }
 
-    // Register as unicast peer.
-    if !manager.peer_exists(src) {
-        manager
-            .add_peer(PeerInfo {
-                interface: esp_radio::esp_now::EspNowWifiInterface::Sta,
-                peer_address: *src,
-                lmk: None,
-                channel: None,
-                encrypt: false,
-            })
-            .unwrap();
-    }
-
-    // Update state.
-    {
-        let mut s = state.lock().await;
-        match hello.role {
-            Role::Tx => {
-                s.tx_paired = true;
-                s.tx_mac = *src;
+        // Update state.
+        {
+            let mut s = state.lock().await;
+            match hello.role {
+                Role::Tx => {
+                    s.tx_paired = true;
+                    s.tx_mac = *src;
+                    s.last_tx_seen = Some(Instant::now());
+                }
+                Role::Turntable => {
+                    s.turntable_paired = true;
+                    s.turntable_mac = *src;
+                    s.last_turntable_seen = Some(Instant::now());
+                }
+                Role::Rx => {}
             }
-            Role::Turntable => {
-                s.turntable_paired = true;
-                s.turntable_mac = *src;
-            }
-            Role::Rx => {}
         }
     }
 
-    // Send pair confirmation unicast to the discovered peer.
-    let confirm = EspnowMessage::PairConfirm(proto::PairConfirm { role: Role::Rx, mac: [0; 6] });
+    // Always send PairConfirm — the peer may not have received a previous one
+    // (send failures are silently ignored, and the TX can only pair via
+    // PairConfirm, unlike the turntable which also pairs on Hello(Rx) broadcasts).
+    let confirm = EspnowMessage::PairConfirm(proto::PairConfirm {
+        role: Role::Rx,
+        mac: [0; 6],
+    });
     let mut buf = [0u8; proto::MAX_MSG_SIZE];
     if let Ok(data) = proto::serialize(&confirm, &mut buf) {
         let mut s = sender.lock().await;
         let _ = s.send_async(src, data).await;
-        info!("Sent PairConfirm to {:?}", hello.role);
+        if !already_paired {
+            info!("Sent PairConfirm to {:?}", hello.role);
+        }
     }
 }
 
@@ -444,7 +558,15 @@ async fn serial_rx_task(
                     match postcard::from_bytes_cobs::<PcToRx>(&mut frame_buf[..len + 1]) {
                         Ok(cmd) => {
                             info!("Serial cmd: {:?}", defmt::Debug2Format(&cmd));
-                            handle_serial_cmd(cmd, state, &resp_tx, &sweep_cmd_tx, stop_signal, sender).await;
+                            handle_serial_cmd(
+                                cmd,
+                                state,
+                                &resp_tx,
+                                &sweep_cmd_tx,
+                                stop_signal,
+                                sender,
+                            )
+                            .await;
                         }
                         Err(_) => {
                             info!("Failed to decode serial COBS frame ({} bytes)", len);
@@ -473,13 +595,20 @@ async fn handle_serial_cmd(
     match cmd {
         PcToRx::QueryStatus => {
             let s = state.lock().await;
-            resp_tx.send(RxToPc::Status {
-                sweeping: s.sweeping,
-                tx_connected: s.tx_paired,
-                turntable_connected: s.turntable_paired,
-            }).await;
+            resp_tx
+                .send(RxToPc::Status {
+                    sweeping: s.sweeping,
+                    tx_connected: s.tx_paired,
+                    turntable_connected: s.turntable_paired,
+                })
+                .await;
         }
-        PcToRx::StartSweep { start_deg, stop_deg, step_deg, samples_per_angle } => {
+        PcToRx::StartSweep {
+            start_deg,
+            stop_deg,
+            step_deg,
+            samples_per_angle,
+        } => {
             // Reject if already sweeping.
             if state.lock().await.sweeping {
                 let mut desc = heapless::String::new();
@@ -496,12 +625,14 @@ async fn handle_serial_cmd(
             }
             // Send sweep command to sweep_task (non-blocking try_send would lose error;
             // channel size 1 means this blocks only if sweep_task hasn't consumed the last cmd).
-            sweep_cmd_tx.send(SweepCmd {
-                start_deg,
-                stop_deg,
-                step_deg,
-                samples_per_angle,
-            }).await;
+            sweep_cmd_tx
+                .send(SweepCmd {
+                    start_deg,
+                    stop_deg,
+                    step_deg,
+                    samples_per_angle,
+                })
+                .await;
         }
         PcToRx::Stop => {
             info!("Stop command received");
@@ -511,14 +642,28 @@ async fn handle_serial_cmd(
         }
         PcToRx::ReturnHome => {
             info!("ReturnHome: moving to 0°");
-            send_turntable_cmd(sender, state, proto::TurntableCommand::MoveTo { angle_deg: 0.0 }).await;
+            send_turntable_cmd(
+                sender,
+                state,
+                proto::TurntableCommand::MoveTo { angle_deg: 0.0 },
+            )
+            .await;
         }
-        PcToRx::ConfigureTx { channel, tx_power_dbm, packet_rate_hz } => {
-            send_tx_cmd(sender, state, proto::TxCommand::Configure {
-                channel,
-                tx_power_dbm,
-                packet_rate_hz,
-            }).await;
+        PcToRx::ConfigureTx {
+            channel,
+            tx_power_dbm,
+            packet_rate_hz,
+        } => {
+            send_tx_cmd(
+                sender,
+                state,
+                proto::TxCommand::Configure {
+                    channel,
+                    tx_power_dbm,
+                    packet_rate_hz,
+                },
+            )
+            .await;
         }
     }
 }
@@ -634,14 +779,24 @@ async fn sweep_task(
             "Sweep start: {}° to {}° step {}°",
             cmd.start_deg, cmd.stop_deg, cmd.step_deg
         );
-        led_signal.signal(LedState::Blink { color: COLOR_AMBER, period_ms: 500 });
+        led_signal.signal(LedState::Blink {
+            color: COLOR_AMBER,
+            period_ms: 500,
+        });
 
         // Tell TX board to start transmitting so we can measure RSSI.
         send_tx_cmd(sender, state, proto::TxCommand::StartTransmit).await;
 
         let result = run_sweep_inner(
-            &cmd, sender, state, turntable_resp_signal, stop_signal, &resp_tx, &rssi_rx,
-        ).await;
+            &cmd,
+            sender,
+            state,
+            turntable_resp_signal,
+            stop_signal,
+            &resp_tx,
+            &rssi_rx,
+        )
+        .await;
 
         // Always stop TX — cleanup on success, error, and abort paths.
         send_tx_cmd(sender, state, proto::TxCommand::StopTransmit).await;
@@ -689,7 +844,11 @@ async fn run_sweep_inner(
     // Manual ceil to avoid libm dependency: floor + 1 if fractional part > tiny threshold.
     let n = abs_range / cmd.step_deg;
     let floor_n = n as u32;
-    let num_steps = if n - floor_n as f32 > 0.001 { floor_n + 1 } else { floor_n };
+    let num_steps = if n - floor_n as f32 > 0.001 {
+        floor_n + 1
+    } else {
+        floor_n
+    };
 
     for i in 0..=num_steps {
         // Check for stop signal.
@@ -703,15 +862,33 @@ async fn run_sweep_inner(
         // Clamp to stop_deg so the final point lands exactly on the endpoint.
         let raw_angle = cmd.start_deg + i as f32 * cmd.step_deg * sign;
         let angle = if going_forward {
-            if raw_angle > cmd.stop_deg { cmd.stop_deg } else { raw_angle }
+            if raw_angle > cmd.stop_deg {
+                cmd.stop_deg
+            } else {
+                raw_angle
+            }
         } else {
-            if raw_angle < cmd.stop_deg { cmd.stop_deg } else { raw_angle }
+            if raw_angle < cmd.stop_deg {
+                cmd.stop_deg
+            } else {
+                raw_angle
+            }
         };
 
         // Send MoveTo command.
-        info!("Sweep: moving to {}° (step {}/{})", angle, i + 1, num_steps + 1);
+        info!(
+            "Sweep: moving to {}° (step {}/{})",
+            angle,
+            i + 1,
+            num_steps + 1
+        );
         turntable_resp_signal.reset();
-        send_turntable_cmd(sender, state, proto::TurntableCommand::MoveTo { angle_deg: angle }).await;
+        send_turntable_cmd(
+            sender,
+            state,
+            proto::TurntableCommand::MoveTo { angle_deg: angle },
+        )
+        .await;
 
         // Wait for turntable response with 30s timeout.
         match with_timeout(Duration::from_secs(30), turntable_resp_signal.wait()).await {
@@ -732,19 +909,32 @@ async fn run_sweep_inner(
         }
 
         // Collect real RSSI samples and report.
-        let (rssi_dbm, sample_count) = collect_rssi(rssi_rx, cmd.samples_per_angle, RSSI_COLLECT_TIMEOUT).await;
-        info!("  angle={}° rssi={} dBm ({} samples)", angle, rssi_dbm, sample_count);
-        resp_tx.send(RxToPc::DataPoint {
-            angle_deg: angle,
-            rssi_dbm,
-            sample_count,
-        }).await;
+        let (rssi_dbm, sample_count) =
+            collect_rssi(rssi_rx, cmd.samples_per_angle, RSSI_COLLECT_TIMEOUT).await;
+        info!(
+            "  angle={}° rssi={} dBm ({} samples)",
+            angle, rssi_dbm, sample_count
+        );
+        resp_tx
+            .send(RxToPc::DataPoint {
+                angle_deg: angle,
+                rssi_dbm,
+                sample_count,
+            })
+            .await;
     }
 
     // Return turntable to start position so the next sweep doesn't backtrack first.
     info!("Sweep done, returning to {}°", cmd.start_deg);
     turntable_resp_signal.reset();
-    send_turntable_cmd(sender, state, proto::TurntableCommand::MoveTo { angle_deg: cmd.start_deg }).await;
+    send_turntable_cmd(
+        sender,
+        state,
+        proto::TurntableCommand::MoveTo {
+            angle_deg: cmd.start_deg,
+        },
+    )
+    .await;
     match with_timeout(Duration::from_secs(30), turntable_resp_signal.wait()).await {
         Ok(proto::TurntableResponse::MoveComplete { .. }) => {}
         Ok(proto::TurntableResponse::Error { description }) => {
