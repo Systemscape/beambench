@@ -37,3 +37,11 @@ test-integration:
 # Run all tests
 test-all:
     cargo test --features sim
+
+# Format frontend code with Prettier
+format:
+    cd frontend && pnpm run format
+
+# Lint frontend code with ESLint
+lint:
+    cd frontend && pnpm run lint
