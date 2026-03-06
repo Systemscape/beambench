@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicI32;
 
 use axum::{
     Router,
@@ -30,6 +31,9 @@ const VERIFY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Timeout for the ReturnHome completion response from the Bridge.
 const HOME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Timeout for a single jog move to complete.
+const JOG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 #[derive(Parser)]
 struct Args {
@@ -61,6 +65,10 @@ struct AppState {
     tx_connected: AtomicBool,
     rx_connected: AtomicBool,
     turntable_connected: AtomicBool,
+    /// Tracked turntable angle in centi-degrees (×100) for atomic access.
+    turntable_angle_cdeg: AtomicI32,
+    /// Whether a jog move is in progress.
+    jogging: AtomicBool,
 }
 
 impl AppState {
@@ -119,6 +127,8 @@ async fn main() {
         tx_connected: AtomicBool::new(false),
         rx_connected: AtomicBool::new(false),
         turntable_connected: AtomicBool::new(false),
+        turntable_angle_cdeg: AtomicI32::new(0),
+        jogging: AtomicBool::new(false),
     });
 
     let api = Router::new()
@@ -485,6 +495,7 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
                     match result {
                         Ok(Ok(())) => {
                             tracing::info!("Turntable reached home");
+                            state.turntable_angle_cdeg.store(0, Ordering::SeqCst);
                             let _ = state.ws_tx.send(WsEvent::HomeComplete);
                             let _ = state.ws_tx.send(WsEvent::Log {
                                 message: "Turntable reached home position".to_string(),
@@ -513,6 +524,91 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
                 state.homing.store(false, Ordering::SeqCst);
                 state.broadcast_error(
                     "ReturnHome failed: not connected",
+                    "Not connected to serial/TCP",
+                );
+            }
+        }
+        WsCommand::Jog { delta_deg } => {
+            if state.sweeping.load(Ordering::SeqCst) || state.homing.load(Ordering::SeqCst) {
+                let _ = state.ws_tx.send(WsEvent::Error {
+                    message: "Cannot jog while sweep or homing is in progress".to_string(),
+                });
+                return;
+            }
+            if state.jogging.swap(true, Ordering::SeqCst) {
+                let _ = state.ws_tx.send(WsEvent::Error {
+                    message: "Jog already in progress".to_string(),
+                });
+                return;
+            }
+
+            let current_cdeg = state.turntable_angle_cdeg.load(Ordering::SeqCst);
+            let target_deg = (current_cdeg as f32 / 100.0) + delta_deg;
+
+            let cloned = {
+                let serial = state.serial.lock().await;
+                serial.as_ref().map(|h| (h.tx.clone(), h.rx.clone()))
+            };
+            if let Some((serial_tx, serial_rx)) = cloned {
+                let _ = state.ws_tx.send(WsEvent::Log {
+                    message: format!("Jogging to {:.1}°", target_deg),
+                });
+
+                let state = state.clone();
+                tokio::spawn(async move {
+                    let _ = serial_tx
+                        .send(beambench_protocol::PcCommand::MoveTo { angle_deg: target_deg })
+                        .await;
+
+                    let result = tokio::time::timeout(JOG_TIMEOUT, async {
+                        let mut rx = serial_rx.lock().await;
+                        loop {
+                            match rx.recv().await {
+                                Some(beambench_protocol::DeviceEvent::MoveComplete { angle_deg }) => {
+                                    return Ok(angle_deg);
+                                }
+                                Some(beambench_protocol::DeviceEvent::StepperError { description }) => {
+                                    return Err(description.to_string());
+                                }
+                                Some(beambench_protocol::DeviceEvent::Error { description }) => {
+                                    return Err(description.to_string());
+                                }
+                                Some(_) => continue,
+                                None => return Err("Serial connection lost".to_string()),
+                            }
+                        }
+                    })
+                    .await;
+
+                    match result {
+                        Ok(Ok(angle_deg)) => {
+                            let cdeg = (angle_deg * 100.0) as i32;
+                            state.turntable_angle_cdeg.store(cdeg, Ordering::SeqCst);
+                            let _ = state.ws_tx.send(WsEvent::Log {
+                                message: format!("Turntable at {:.1}°", angle_deg),
+                            });
+                            let _ = state.ws_tx.send(WsEvent::JogComplete { angle_deg });
+                        }
+                        Ok(Err(e)) => {
+                            state.broadcast_error(
+                                &format!("Jog failed: {}", e),
+                                &e,
+                            );
+                        }
+                        Err(_) => {
+                            state.broadcast_error(
+                                "Jog timed out (15s)",
+                                "Jog timed out — turntable may be stuck",
+                            );
+                        }
+                    }
+
+                    state.jogging.store(false, Ordering::SeqCst);
+                });
+            } else {
+                state.jogging.store(false, Ordering::SeqCst);
+                state.broadcast_error(
+                    "Jog failed: not connected",
                     "Not connected to serial/TCP",
                 );
             }

@@ -48,6 +48,7 @@ export type WsEvent =
       }
     | { type: 'SweepComplete' }
     | { type: 'HomeComplete' }
+    | { type: 'JogComplete'; angle_deg: number }
     | {
           type: 'Status';
           sweeping: boolean;
@@ -85,7 +86,8 @@ export type WsCommand =
     | { type: 'Connect'; port: string }
     | { type: 'Disconnect' }
     | { type: 'ExportCsv' }
-    | { type: 'ReturnHome' };
+    | { type: 'ReturnHome' }
+    | { type: 'Jog'; delta_deg: number };
 
 export function createWsConnection(
     onEvent: (event: WsEvent) => void,

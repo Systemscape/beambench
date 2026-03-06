@@ -69,6 +69,8 @@ pub enum WsEvent {
     SweepComplete,
     /// Turntable reached the home (0°) position after a ReturnHome command.
     HomeComplete,
+    /// Turntable completed a jog move and is now at the given angle.
+    JogComplete { angle_deg: f32 },
     /// Full system status snapshot (sent on connect and on every state change).
     Status(SystemStatus),
     /// An error occurred (displayed as a transient banner in the UI).
@@ -99,6 +101,8 @@ pub enum WsCommand {
     ExportCsv,
     /// Return the turntable to its home (0°) position.
     ReturnHome,
+    /// Jog the turntable by a relative angle (positive = CW, negative = CCW).
+    Jog { delta_deg: f32 },
 }
 
 impl SweepConfig {
@@ -176,6 +180,7 @@ mod tests {
         json_round_trip(&WsCommand::Disconnect);
         json_round_trip(&WsCommand::ExportCsv);
         json_round_trip(&WsCommand::QueryStatus);
+        json_round_trip(&WsCommand::Jog { delta_deg: -10.0 });
         json_round_trip(&WsCommand::Connect {
             port: "tcp://127.0.0.1:9876".to_string(),
         });
@@ -196,6 +201,7 @@ mod tests {
     fn ws_event_json_round_trip() {
         json_round_trip(&WsEvent::SweepComplete);
         json_round_trip(&WsEvent::HomeComplete);
+        json_round_trip(&WsEvent::JogComplete { angle_deg: 45.0 });
         json_round_trip(&WsEvent::Error {
             message: "test error".to_string(),
         });

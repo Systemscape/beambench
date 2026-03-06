@@ -60,6 +60,10 @@
     let connecting = $state(false);
     let stopping = $state(false);
     let homing = $state(false);
+    let jogging = $state(false);
+
+    // Turntable position (tracked from JogComplete / HomeComplete)
+    let turntableAngle = $state(0);
 
     /** Client-side mirror of SweepConfig::validate(). */
     let configError: string | null = $derived.by(() => {
@@ -128,7 +132,13 @@
                 break;
             case 'HomeComplete':
                 homing = false;
+                turntableAngle = 0;
                 addLog('Turntable reached home position');
+                break;
+            case 'JogComplete':
+                jogging = false;
+                turntableAngle = event.angle_deg;
+                addLog(`Turntable at ${event.angle_deg.toFixed(1)}°`);
                 break;
             case 'Status':
                 connecting = false;
@@ -146,6 +156,7 @@
                 connecting = false;
                 stopping = false;
                 homing = false;
+                jogging = false;
                 errorMessage = event.message;
                 addLog(`Error: ${event.message}`);
                 setTimeout(() => {
@@ -308,6 +319,11 @@
         ws?.send({ type: 'ReturnHome' });
     }
 
+    function jog(delta: number) {
+        jogging = true;
+        ws?.send({ type: 'Jog', delta_deg: delta });
+    }
+
     function toggleMeasurement(id: number) {
         measurements = measurements.map((m) =>
             m.id === id ? { ...m, visible: !m.visible } : m
@@ -398,6 +414,48 @@
             </section>
 
             <section>
+                <h2>Turntable</h2>
+                <p class="info" style="margin-top: 0">
+                    Position: <strong>{turntableAngle.toFixed(1)}&deg;</strong>
+                    {#if jogging}<span class="jog-indicator"> (moving...)</span>{/if}
+                </p>
+                <div class="jog-row">
+                    <button
+                        class="secondary"
+                        onclick={() => jog(-10)}
+                        disabled={!status.serial_connected || !status.turntable_connected || status.sweeping || homing || jogging}>
+                        &minus;10&deg;
+                    </button>
+                    <button
+                        class="secondary"
+                        onclick={() => jog(-1)}
+                        disabled={!status.serial_connected || !status.turntable_connected || status.sweeping || homing || jogging}>
+                        &minus;1&deg;
+                    </button>
+                    <button
+                        class="secondary"
+                        onclick={() => jog(1)}
+                        disabled={!status.serial_connected || !status.turntable_connected || status.sweeping || homing || jogging}>
+                        +1&deg;
+                    </button>
+                    <button
+                        class="secondary"
+                        onclick={() => jog(10)}
+                        disabled={!status.serial_connected || !status.turntable_connected || status.sweeping || homing || jogging}>
+                        +10&deg;
+                    </button>
+                </div>
+                <div class="button-row">
+                    <button
+                        class="secondary"
+                        onclick={returnHome}
+                        disabled={!status.serial_connected || !status.turntable_connected || status.sweeping || homing || jogging}>
+                        {homing ? 'Homing...' : 'Return Home'}
+                    </button>
+                </div>
+            </section>
+
+            <section>
                 <h2>Sweep Configuration</h2>
                 <div class="field">
                     <label for="start">Start angle (deg)</label>
@@ -434,18 +492,12 @@
                         Start Sweep
                     </button>
                 </div>
-                <div class="button-row connect-row">
+                <div class="button-row">
                     <button
                         class="danger"
                         onclick={stopSweep}
                         disabled={!status.sweeping || stopping}>
                         {stopping ? 'Stopping...' : 'Stop'}
-                    </button>
-                    <button
-                        class="secondary"
-                        onclick={returnHome}
-                        disabled={!status.serial_connected || status.sweeping || homing}>
-                        {homing ? 'Homing...' : 'Home'}
                     </button>
                 </div>
                 <p class="info">
@@ -806,5 +858,22 @@
     .icon-btn:hover {
         color: #e53935;
         background: transparent;
+    }
+
+    .jog-row {
+        display: flex;
+        gap: 0.35rem;
+    }
+
+    .jog-row button {
+        flex: 1;
+        padding: 0.45rem 0;
+        font-size: 0.8rem;
+        font-variant-numeric: tabular-nums;
+    }
+
+    .jog-indicator {
+        color: #ffa726;
+        font-style: italic;
     }
 </style>
