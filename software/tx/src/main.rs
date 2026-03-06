@@ -10,7 +10,7 @@ use defmt::info;
 use embassy_executor::Spawner;
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, mutex::Mutex, signal::Signal};
 use embassy_futures::select::{Either, select};
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Instant, Timer};
 use esp_alloc as _;
 use esp_backtrace as _;
 use esp_hal::{
@@ -54,6 +54,8 @@ const BEACON_INTERVAL: Duration = Duration::from_secs(1);
 /// Default packet transmission interval (10 Hz).
 const DEFAULT_TX_INTERVAL: Duration = Duration::from_millis(100);
 
+const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(15);
+
 // ── State ────────────────────────────────────────────────────────────────────
 
 /// Shared transmitter state.
@@ -62,15 +64,17 @@ struct TxState {
     tx_interval: Duration,
     rx_paired: bool,
     rx_mac: [u8; 6],
+    last_rx_seen: Option<Instant>,
 }
 
 impl TxState {
-    const fn new() -> Self {
+    fn new() -> Self {
         Self {
             transmitting: false,
             tx_interval: DEFAULT_TX_INTERVAL,
             rx_paired: false,
             rx_mac: [0u8; 6],
+            last_rx_seen: None,
         }
     }
 }
@@ -145,7 +149,7 @@ async fn main(spawner: Spawner) -> ! {
 
     let paired_signal = mk_static!(Signal<NoopRawMutex, ()>, Signal::new());
 
-    spawner.spawn(discovery_task(manager, sender, state)).ok();
+    spawner.spawn(discovery_task(manager, sender, state, led_signal)).ok();
     spawner.spawn(listener_task(manager, sender, receiver, state, paired_signal, led_signal)).ok();
     spawner.spawn(transmit_task(sender, state)).ok();
 
@@ -188,9 +192,10 @@ async fn main(spawner: Spawner) -> ! {
 /// so that RX can discover us even if it boots later.
 #[embassy_executor::task]
 async fn discovery_task(
-    _manager: &'static EspNowManager<'static>,
+    manager: &'static EspNowManager<'static>,
     sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
     state: &'static Mutex<NoopRawMutex, TxState>,
+    led_signal: &'static Signal<NoopRawMutex, LedState>,
 ) {
     let mut buf = [0u8; proto::MAX_MSG_SIZE];
 
@@ -200,6 +205,27 @@ async fn discovery_task(
             Timer::after(Duration::from_secs(10)).await;
         } else {
             Timer::after(BEACON_INTERVAL).await;
+        }
+
+        // Check for stale RX and unpair.
+        {
+            let mut s = state.lock().await;
+            if s.rx_paired {
+                if let Some(last) = s.last_rx_seen {
+                    if Instant::now() - last > HEARTBEAT_TIMEOUT {
+                        info!("RX heartbeat timeout, unpairing");
+                        let _ = manager.remove_peer(&s.rx_mac);
+                        s.rx_paired = false;
+                        s.transmitting = false;
+                        s.last_rx_seen = None;
+                    }
+                }
+            }
+            if s.rx_paired {
+                led_signal.signal(LedState::Solid(COLOR_GREEN));
+            } else {
+                led_signal.signal(LedState::Blink { color: COLOR_BLUE, period_ms: 500 });
+            }
         }
 
         let beacon = EspnowMessage::Hello(proto::HelloBeacon {
@@ -250,11 +276,14 @@ async fn listener_task(
                     let mut s = state.lock().await;
                     s.rx_paired = true;
                     s.rx_mac = src;
+                    s.last_rx_seen = Some(Instant::now());
                     drop(s);
                     paired_signal.signal(());
+                    led_signal.signal(LedState::Solid(COLOR_GREEN));
                 }
             }
             Ok(EspnowMessage::TxCmd(cmd)) => {
+                state.lock().await.last_rx_seen = Some(Instant::now());
                 match cmd {
                     proto::TxCommand::Configure { channel: _, tx_power_dbm: _, packet_rate_hz } => {
                         info!("Configured: rate={}Hz", packet_rate_hz);

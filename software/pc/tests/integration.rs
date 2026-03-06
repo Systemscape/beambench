@@ -3,7 +3,7 @@
 //! These tests start an in-process rx-sim server, connect via SerialHandle,
 //! run sweeps, and verify the full pipeline including COBS framing, sweep
 //! orchestration, and CSV export.
-//! 
+//!
 //! Assumes the "sim" feature is activated
 
 use beambench_pc::sim;

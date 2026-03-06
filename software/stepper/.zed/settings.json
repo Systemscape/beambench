@@ -4,7 +4,7 @@
       "initialization_options": {
         "cargo": {
           "allTargets": false,
-          "target": "riscv32imac-unknown-none-elf",
+          "target": "riscv32imc-unknown-none-elf",
         },
       },
     },
