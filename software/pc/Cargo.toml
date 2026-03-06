@@ -44,5 +44,8 @@ mime_guess = "2"
 # Heapless strings (used by rx-sim for protocol Error messages)
 heapless = "0.9.2"
 
+# SHA-256 for OTA firmware verification
+sha2 = "0.10"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

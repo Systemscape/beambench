@@ -69,6 +69,9 @@ macro_rules! mk_static {
     }};
 }
 
+/// Flash storage behind a mutex, shared between role provisioning and OTA.
+pub type SharedFlash = embassy_sync::mutex::Mutex<NoopRawMutex, esp_storage::FlashStorage<'static>>;
+
 // ── ESP-NOW channel ─────────────────────────────────────────────────────────
 
 pub const DEFAULT_CHANNEL: u8 = 11;

@@ -67,6 +67,30 @@ pub fn route_command(cmd: &PcCommand) -> RouteAction {
             msg: EspnowMessage::ReportMeasurement,
         },
         PcCommand::QueryStatus => RouteAction::Local,
+
+        // OTA firmware update — relay to the target device.
+        PcCommand::OtaBegin {
+            target,
+            total_size,
+            sha256,
+        } => RouteAction::SendTo {
+            role: *target,
+            msg: EspnowMessage::OtaBegin {
+                total_size: *total_size,
+                sha256: *sha256,
+            },
+        },
+        PcCommand::OtaData { target, seq, data } => RouteAction::SendTo {
+            role: *target,
+            msg: EspnowMessage::OtaData {
+                seq: *seq,
+                data: data.clone(),
+            },
+        },
+        PcCommand::OtaFinish { target } => RouteAction::SendTo {
+            role: *target,
+            msg: EspnowMessage::OtaFinish,
+        },
     }
 }
 
@@ -95,6 +119,14 @@ pub fn translate_response(msg: &EspnowMessage) -> Option<DeviceEvent> {
             rssi_dbm: *rssi_dbm,
             sample_count: *sample_count,
         }),
+        // OTA responses — relay back to PC.
+        EspnowMessage::OtaReady => Some(DeviceEvent::OtaReady),
+        EspnowMessage::OtaAck { seq } => Some(DeviceEvent::OtaAck { seq: *seq }),
+        EspnowMessage::OtaComplete => Some(DeviceEvent::OtaComplete),
+        EspnowMessage::OtaError { description } => Some(DeviceEvent::OtaError {
+            description: description.clone(),
+        }),
+
         _ => None,
     }
 }

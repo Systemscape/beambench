@@ -10,6 +10,7 @@
 mod bridge;
 mod common;
 mod motor;
+mod ota_responder;
 mod role_provision;
 mod rx;
 mod stepper;
@@ -55,10 +56,17 @@ async fn main(spawner: Spawner) -> ! {
 
     esp_alloc::heap_allocator!(size: 72 * 1024);
 
-    // ── Resolve role ─────────────────────────────────────────────────────────
+    // ── Flash + role ──────────────────────────────────────────────────────────
 
-    let role = role_provision::resolve_role(peripherals.FLASH);
+    let mut flash_storage = esp_storage::FlashStorage::new(peripherals.FLASH);
+    let role = role_provision::resolve_role(&mut flash_storage);
     info!("Booting as {:?}", defmt::Debug2Format(&role));
+
+    // Make flash available as 'static for OTA responder.
+    let flash = mk_static!(
+        Mutex::<NoopRawMutex, esp_storage::FlashStorage<'static>>,
+        Mutex::new(flash_storage)
+    );
 
     // ── RTOS + Embassy setup ─────────────────────────────────────────────────
 
@@ -85,6 +93,9 @@ async fn main(spawner: Spawner) -> ! {
         esp_now.version().unwrap(),
         DEFAULT_CHANNEL
     );
+
+    // ── Mark OTA slot as valid (prevents rollback after successful boot) ────
+    ota_responder::mark_current_valid(&mut *flash.lock().await);
 
     // ── LED setup (SK6812 on GPIO2 via RMT) ──────────────────────────────────
 
@@ -120,13 +131,13 @@ async fn main(spawner: Spawner) -> ! {
             let (usb_rx, usb_tx) = usb_serial.split();
             let usb_rx = mk_static!(UsbSerialJtagRx<'static, Async>, usb_rx);
             let usb_tx = mk_static!(UsbSerialJtagTx<'static, Async>, usb_tx);
-            bridge::run(spawner, manager, sender, receiver, led_signal, usb_rx, usb_tx).await;
+            bridge::run(spawner, manager, sender, receiver, led_signal, usb_rx, usb_tx, flash).await;
         }
         Role::Rx => {
-            rx::run(spawner, manager, sender, receiver, led_signal).await;
+            rx::run(spawner, manager, sender, receiver, led_signal, flash).await;
         }
         Role::Tx => {
-            tx::run(spawner, manager, sender, receiver, led_signal).await;
+            tx::run(spawner, manager, sender, receiver, led_signal, flash).await;
         }
         Role::Turntable => {
             // Create motor here so GPIO pins don't need to cross task boundaries.
@@ -149,7 +160,7 @@ async fn main(spawner: Spawner) -> ! {
                     Mutex::<NoopRawMutex, StepDirMotor<'static>>,
                     Mutex::new(motor)
                 );
-                stepper::run(spawner, motor, manager, sender, receiver, led_signal).await;
+                stepper::run(spawner, motor, manager, sender, receiver, led_signal, flash).await;
             }
             #[cfg(not(feature = "step-dir"))]
             {

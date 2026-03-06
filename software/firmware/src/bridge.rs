@@ -77,6 +77,15 @@ impl PeerTable {
         }
     }
 
+    fn role_for_mac(&self, mac: &[u8; 6]) -> Option<Role> {
+        for role in [Role::Rx, Role::Tx, Role::Turntable] {
+            if self.peer_for_role(role) == Some(*mac) {
+                return Some(role);
+            }
+        }
+        None
+    }
+
     fn all_connected(&self) -> bool {
         self.rx.is_some() && self.tx.is_some() && self.turntable.is_some()
     }
@@ -98,6 +107,7 @@ pub async fn run(
     led_signal: &'static Signal<NoopRawMutex, LedState>,
     usb_rx: &'static mut UsbSerialJtagRx<'static, Async>,
     usb_tx: &'static mut UsbSerialJtagTx<'static, Async>,
+    _flash: &'static crate::common::SharedFlash,
 ) -> ! {
     let peers = mk_static!(
         Mutex::<NoopRawMutex, PeerTable>,
@@ -353,17 +363,25 @@ async fn bridge_listener_task(
                 }
             }
             Ok(ref espnow_msg) => {
+                // Identify the source role to update heartbeat.
                 let role = match espnow_msg {
                     EspnowMessage::TurntableResp(_) => Some(Role::Turntable),
                     EspnowMessage::TxResp(_) => Some(Role::Tx),
                     EspnowMessage::MeasurementResult { .. } => Some(Role::Rx),
+                    // OTA responses: look up role by source MAC.
+                    EspnowMessage::OtaReady
+                    | EspnowMessage::OtaAck { .. }
+                    | EspnowMessage::OtaComplete
+                    | EspnowMessage::OtaError { .. } => {
+                        peers.lock().await.role_for_mac(&src)
+                    }
                     _ => None,
                 };
                 if let Some(role) = role {
                     peers.lock().await.update_seen(role);
-                    if let Some(event) = bridge_logic::translate_response(espnow_msg) {
-                        event_tx.send(event).await;
-                    }
+                }
+                if let Some(event) = bridge_logic::translate_response(espnow_msg) {
+                    event_tx.send(event).await;
                 }
             }
             _ => {}

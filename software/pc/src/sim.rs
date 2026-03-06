@@ -92,6 +92,8 @@ pub async fn handle_connection(stream: tokio::net::TcpStream) {
                     })
                     .await;
             }
+            // OTA not implemented in simulator.
+            PcCommand::OtaBegin { .. } | PcCommand::OtaData { .. } | PcCommand::OtaFinish { .. } => {}
         }
     }
 }

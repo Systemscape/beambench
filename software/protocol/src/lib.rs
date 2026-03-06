@@ -13,7 +13,7 @@ pub mod bridge_logic;
 pub mod rx_logic;
 pub mod tx_logic;
 
-use heapless::String;
+use heapless::{String, Vec};
 use serde::{Deserialize, Serialize};
 
 // ── Board roles (used during ESPNOW discovery) ──────────────────────────────
@@ -157,6 +157,22 @@ pub enum EspnowMessage {
     ReportMeasurement,
     /// RX -> Bridge: measurement result.
     MeasurementResult { rssi_dbm: f32, sample_count: u16 },
+
+    // OTA firmware update (Bridge ↔ field device)
+    /// Bridge -> target: begin OTA update with expected size and hash.
+    OtaBegin { total_size: u32, sha256: [u8; 32] },
+    /// Target -> Bridge: ready to receive OTA data.
+    OtaReady,
+    /// Bridge -> target: firmware chunk (max 240 bytes to fit ESP-NOW payload).
+    OtaData { seq: u16, data: Vec<u8, 240> },
+    /// Target -> Bridge: acknowledge receipt of chunk.
+    OtaAck { seq: u16 },
+    /// Bridge -> target: all chunks sent.
+    OtaFinish,
+    /// Target -> Bridge: OTA verified and applied, rebooting.
+    OtaComplete,
+    /// Target -> Bridge: OTA failed.
+    OtaError { description: String<64> },
 }
 
 // ── Serial protocol v2 (PC ↔ Bridge) ────────────────────────────────────────
@@ -188,6 +204,14 @@ pub enum PcCommand {
 
     // System
     QueryStatus,
+
+    // OTA firmware update (PC -> Bridge -> target)
+    /// Begin OTA: target role, firmware size, and SHA-256 hash.
+    OtaBegin { target: Role, total_size: u32, sha256: [u8; 32] },
+    /// Stream a firmware chunk (Bridge relays to target via ESP-NOW).
+    OtaData { target: Role, seq: u16, data: Vec<u8, 240> },
+    /// All chunks sent — target should verify and apply.
+    OtaFinish { target: Role },
 }
 
 /// Event from Bridge to PC (over USB-serial, COBS-framed postcard).
@@ -212,6 +236,16 @@ pub enum DeviceEvent {
         stepper_connected: bool,
     },
     Error { description: String<128> },
+
+    // OTA firmware update (target -> Bridge -> PC)
+    /// Target is ready to receive OTA data.
+    OtaReady,
+    /// Target acknowledged a chunk.
+    OtaAck { seq: u16 },
+    /// OTA verified and applied, target is rebooting.
+    OtaComplete,
+    /// OTA failed on the target device.
+    OtaError { description: String<64> },
 }
 
 // ── Serial protocol v1 (PC ↔ RX, legacy) ───────────────────────────────────
@@ -321,7 +355,7 @@ pub fn serialize_cobs<T: Serialize>(msg: &T, buf: &mut [u8]) -> Result<usize, po
 mod test {
     use core::fmt::Debug;
 
-    use heapless::String;
+    use heapless::{String, Vec};
     use serde::{Deserialize, Serialize};
 
     use crate::{
@@ -632,6 +666,82 @@ mod test {
         );
     }
 
+    #[test]
+    fn ota_message_round_trip() {
+        let mut buf = [0u8; MAX_MSG_SIZE];
+
+        // EspnowMessage OTA variants
+        test_ser_deser(
+            &EspnowMessage::OtaBegin {
+                total_size: 0x40000,
+                sha256: [0xAB; 32],
+            },
+            &mut buf,
+        );
+        test_ser_deser(&EspnowMessage::OtaReady, &mut buf);
+        test_ser_deser(&EspnowMessage::OtaFinish, &mut buf);
+        test_ser_deser(&EspnowMessage::OtaComplete, &mut buf);
+        test_ser_deser(
+            &EspnowMessage::OtaAck { seq: 1000 },
+            &mut buf,
+        );
+        test_ser_deser(
+            &EspnowMessage::OtaError {
+                description: String::try_from("flash write failed").unwrap(),
+            },
+            &mut buf,
+        );
+
+        // OtaData with max-size payload (240 bytes)
+        let mut data = Vec::<u8, 240>::new();
+        data.resize(240, 0xFF).unwrap();
+        test_ser_deser(
+            &EspnowMessage::OtaData { seq: 0xFFFF, data },
+            &mut buf,
+        );
+    }
+
+    #[test]
+    fn ota_pc_command_round_trip() {
+        let mut buf = [0u8; MAX_MSG_SIZE];
+
+        test_cobs_round_trip(
+            &PcCommand::OtaBegin {
+                target: Role::Rx,
+                total_size: 0x40000,
+                sha256: [0xCD; 32],
+            },
+            &mut buf,
+        );
+
+        let mut data = Vec::<u8, 240>::new();
+        data.resize(128, 0xAA).unwrap();
+        test_cobs_round_trip(
+            &PcCommand::OtaData {
+                target: Role::Rx,
+                seq: 42,
+                data,
+            },
+            &mut buf,
+        );
+        test_cobs_round_trip(&PcCommand::OtaFinish { target: Role::Tx }, &mut buf);
+    }
+
+    #[test]
+    fn ota_device_event_round_trip() {
+        let mut buf = [0u8; MAX_MSG_SIZE];
+
+        test_cobs_round_trip(&DeviceEvent::OtaReady, &mut buf);
+        test_cobs_round_trip(&DeviceEvent::OtaAck { seq: 500 }, &mut buf);
+        test_cobs_round_trip(&DeviceEvent::OtaComplete, &mut buf);
+        test_cobs_round_trip(
+            &DeviceEvent::OtaError {
+                description: String::try_from("sha256 mismatch").unwrap(),
+            },
+            &mut buf,
+        );
+    }
+
     // ── Bridge routing tests ──────────────────────────────────────────────
 
     mod bridge_routing_tests {
@@ -801,6 +911,94 @@ mod test {
                     mac: [0; 6],
                 })),
                 None
+            );
+        }
+
+        // ── OTA routing tests ────────────────────────────────────────────
+
+        #[test]
+        fn ota_begin_routes_to_target() {
+            let action = route_command(&PcCommand::OtaBegin {
+                target: Role::Rx,
+                total_size: 0x40000,
+                sha256: [0xAB; 32],
+            });
+            assert_eq!(
+                action,
+                RouteAction::SendTo {
+                    role: Role::Rx,
+                    msg: EspnowMessage::OtaBegin {
+                        total_size: 0x40000,
+                        sha256: [0xAB; 32],
+                    },
+                }
+            );
+        }
+
+        #[test]
+        fn ota_data_routes_to_target() {
+            let mut data = Vec::<u8, 240>::new();
+            data.resize(10, 0xFF).unwrap();
+            let action = route_command(&PcCommand::OtaData {
+                target: Role::Tx,
+                seq: 5,
+                data: data.clone(),
+            });
+            assert_eq!(
+                action,
+                RouteAction::SendTo {
+                    role: Role::Tx,
+                    msg: EspnowMessage::OtaData { seq: 5, data },
+                }
+            );
+        }
+
+        #[test]
+        fn ota_finish_routes_to_target() {
+            let action = route_command(&PcCommand::OtaFinish {
+                target: Role::Turntable,
+            });
+            assert_eq!(
+                action,
+                RouteAction::SendTo {
+                    role: Role::Turntable,
+                    msg: EspnowMessage::OtaFinish,
+                }
+            );
+        }
+
+        #[test]
+        fn translate_ota_ready() {
+            assert_eq!(
+                translate_response(&EspnowMessage::OtaReady),
+                Some(DeviceEvent::OtaReady),
+            );
+        }
+
+        #[test]
+        fn translate_ota_ack() {
+            assert_eq!(
+                translate_response(&EspnowMessage::OtaAck { seq: 42 }),
+                Some(DeviceEvent::OtaAck { seq: 42 }),
+            );
+        }
+
+        #[test]
+        fn translate_ota_complete() {
+            assert_eq!(
+                translate_response(&EspnowMessage::OtaComplete),
+                Some(DeviceEvent::OtaComplete),
+            );
+        }
+
+        #[test]
+        fn translate_ota_error() {
+            let desc = String::try_from("flash error").unwrap();
+            assert_eq!(
+                translate_response(&EspnowMessage::OtaError {
+                    description: desc.clone(),
+                }),
+                Some(DeviceEvent::OtaError { description: desc }),
             );
         }
     }

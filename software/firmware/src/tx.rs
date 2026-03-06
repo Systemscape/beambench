@@ -44,14 +44,19 @@ pub async fn run(
     sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
     receiver: EspNowReceiver<'static>,
     led_signal: &'static Signal<NoopRawMutex, LedState>,
+    flash: &'static SharedFlash,
 ) -> ! {
     let state = mk_static!(
         Mutex::<NoopRawMutex, TxState>,
         Mutex::<NoopRawMutex, _>::new(TxState::new())
     );
+    let ota = mk_static!(
+        Mutex::<NoopRawMutex, crate::ota_responder::OtaState>,
+        Mutex::new(crate::ota_responder::OtaState::new())
+    );
 
     spawner.spawn(tx_discovery_task(manager, sender, state, led_signal)).ok();
-    spawner.spawn(tx_listener_task(manager, receiver, state, led_signal)).ok();
+    spawner.spawn(tx_listener_task(manager, sender, receiver, state, led_signal, flash, ota)).ok();
     spawner.spawn(tx_transmit_task(sender, state)).ok();
 
     info!("TX role ready, broadcasting discovery beacons");
@@ -107,9 +112,12 @@ async fn tx_discovery_task(
 #[embassy_executor::task]
 async fn tx_listener_task(
     manager: &'static EspNowManager<'static>,
+    sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
     mut receiver: EspNowReceiver<'static>,
     state: &'static Mutex<NoopRawMutex, TxState>,
     led_signal: &'static Signal<NoopRawMutex, LedState>,
+    flash: &'static SharedFlash,
+    ota: &'static Mutex<NoopRawMutex, crate::ota_responder::OtaState>,
 ) {
     loop {
         let received = receiver.receive_async().await;
@@ -159,6 +167,15 @@ async fn tx_listener_task(
                         info!("Stop transmitting");
                         state.lock().await.transmitting = false;
                         led_signal.signal(LedState::Solid(COLOR_GREEN));
+                    }
+                }
+            }
+            Ok(ref espnow_msg) if crate::ota_responder::is_ota_message(espnow_msg) => {
+                if let Some(resp) = crate::ota_responder::handle_ota_message(espnow_msg, ota, flash).await {
+                    let bridge_mac = state.lock().await.bridge_mac;
+                    crate::ota_responder::send_ota_response(sender, &bridge_mac, &resp).await;
+                    if matches!(resp, EspnowMessage::OtaComplete) {
+                        crate::ota_responder::schedule_reboot().await;
                     }
                 }
             }

@@ -3,6 +3,7 @@
 //! This module contains serial communication, sweep orchestration, and data
 //! management — all independent of the GUI/web layer.
 
+pub mod ota;
 pub mod serial;
 #[cfg(any(test, feature = "sim"))]
 pub mod sim;
@@ -73,6 +74,10 @@ pub enum WsEvent {
     JogComplete { angle_deg: f32 },
     /// Full system status snapshot (sent on connect and on every state change).
     Status(SystemStatus),
+    /// OTA progress update during firmware streaming.
+    OtaProgress { chunks_sent: u16, total_chunks: u16 },
+    /// OTA update completed successfully — target device will reboot.
+    OtaFinished,
     /// An error occurred (displayed as a transient banner in the UI).
     Error { message: String },
     /// Informational log message (appended to the log panel).
@@ -103,6 +108,9 @@ pub enum WsCommand {
     ReturnHome,
     /// Jog the turntable by a relative angle (positive = CW, negative = CCW).
     Jog { delta_deg: f32 },
+    /// Start an OTA firmware update for the specified target device.
+    /// Target is "rx", "tx", "turntable", or "bridge".
+    OtaUpload { target: String, firmware_path: String },
 }
 
 impl SweepConfig {
@@ -195,6 +203,10 @@ mod tests {
             tx_power_dbm: 20,
             packet_rate_hz: 100,
         }));
+        json_round_trip(&WsCommand::OtaUpload {
+            target: "rx".to_string(),
+            firmware_path: "/tmp/firmware.bin".to_string(),
+        });
     }
 
     #[test]
@@ -208,6 +220,11 @@ mod tests {
         json_round_trip(&WsEvent::Log {
             message: "Connected to /dev/ttyUSB0".to_string(),
         });
+        json_round_trip(&WsEvent::OtaProgress {
+            chunks_sent: 42,
+            total_chunks: 100,
+        });
+        json_round_trip(&WsEvent::OtaFinished);
         json_round_trip(&WsEvent::DataPoint(DataPoint {
             angle_deg: 45.0,
             rssi_dbm: -30.0,

@@ -43,14 +43,19 @@ pub async fn run(
     sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
     receiver: EspNowReceiver<'static>,
     led_signal: &'static Signal<NoopRawMutex, LedState>,
+    flash: &'static SharedFlash,
 ) -> ! {
     let state = mk_static!(
         Mutex::<NoopRawMutex, RxState>,
         Mutex::<NoopRawMutex, _>::new(RxState::new())
     );
+    let ota = mk_static!(
+        Mutex::<NoopRawMutex, crate::ota_responder::OtaState>,
+        Mutex::new(crate::ota_responder::OtaState::new())
+    );
 
     spawner.spawn(rx_discovery_task(sender, state, manager, led_signal)).ok();
-    spawner.spawn(rx_listener_task(manager, sender, receiver, state, led_signal)).ok();
+    spawner.spawn(rx_listener_task(manager, sender, receiver, state, led_signal, flash, ota)).ok();
 
     info!("RX role ready, discovering Bridge...");
 
@@ -107,6 +112,8 @@ async fn rx_listener_task(
     mut receiver: EspNowReceiver<'static>,
     state: &'static Mutex<NoopRawMutex, RxState>,
     led_signal: &'static Signal<NoopRawMutex, LedState>,
+    flash: &'static SharedFlash,
+    ota: &'static Mutex<NoopRawMutex, crate::ota_responder::OtaState>,
 ) {
     loop {
         let received = receiver.receive_async().await;
@@ -174,6 +181,15 @@ async fn rx_listener_task(
             }
             Ok(EspnowMessage::MeasurementBeacon) => {
                 state.lock().await.measurement.accumulate_rssi(rssi);
+            }
+            Ok(ref espnow_msg) if crate::ota_responder::is_ota_message(espnow_msg) => {
+                if let Some(resp) = crate::ota_responder::handle_ota_message(espnow_msg, ota, flash).await {
+                    let bridge_mac = state.lock().await.bridge_mac;
+                    crate::ota_responder::send_ota_response(sender, &bridge_mac, &resp).await;
+                    if matches!(resp, EspnowMessage::OtaComplete) {
+                        crate::ota_responder::schedule_reboot().await;
+                    }
+                }
             }
             _ => {}
         }

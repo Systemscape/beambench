@@ -65,6 +65,8 @@ struct AppState {
     turntable_angle_cdeg: AtomicI32,
     /// Whether a jog move is in progress.
     jogging: AtomicBool,
+    /// Whether an OTA firmware update is in progress.
+    ota_in_progress: AtomicBool,
 }
 
 impl AppState {
@@ -170,6 +172,7 @@ async fn main() {
         turntable_connected: AtomicBool::new(false),
         turntable_angle_cdeg: AtomicI32::new(0),
         jogging: AtomicBool::new(false),
+        ota_in_progress: AtomicBool::new(false),
     });
 
     let api = Router::new()
@@ -396,10 +399,16 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
             state.broadcast_status().await;
         }
         WsCommand::StartSweep(config) => {
-            // Prevent concurrent sweeps and sweep-during-homing.
+            // Prevent concurrent sweeps and sweep-during-homing/OTA.
             if state.homing.load(Ordering::SeqCst) {
                 let _ = state.ws_tx.send(WsEvent::Error {
                     message: "Cannot start sweep while homing".to_string(),
+                });
+                return;
+            }
+            if state.ota_in_progress.load(Ordering::SeqCst) {
+                let _ = state.ws_tx.send(WsEvent::Error {
+                    message: "Cannot start sweep while OTA is in progress".to_string(),
                 });
                 return;
             }
@@ -521,6 +530,80 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
             } else {
                 state.homing.store(false, Ordering::SeqCst);
                 state.broadcast_error("ReturnHome failed: not connected", "Not connected to serial/TCP");
+            }
+        }
+        WsCommand::OtaUpload { target, firmware_path } => {
+            if state.sweeping.load(Ordering::SeqCst) {
+                let _ = state.ws_tx.send(WsEvent::Error {
+                    message: "Cannot start OTA while sweep is in progress".to_string(),
+                });
+                return;
+            }
+            if state.ota_in_progress.swap(true, Ordering::SeqCst) {
+                let _ = state.ws_tx.send(WsEvent::Error {
+                    message: "OTA already in progress".to_string(),
+                });
+                return;
+            }
+
+            let role = match beambench_pc::ota::parse_role(&target) {
+                Some(r) => r,
+                None => {
+                    state.ota_in_progress.store(false, Ordering::SeqCst);
+                    let _ = state.ws_tx.send(WsEvent::Error {
+                        message: format!("Unknown target role: {}", target),
+                    });
+                    return;
+                }
+            };
+
+            let firmware = match std::fs::read(&firmware_path) {
+                Ok(data) => data,
+                Err(e) => {
+                    state.ota_in_progress.store(false, Ordering::SeqCst);
+                    state.broadcast_error(
+                        &format!("Failed to read firmware: {}", e),
+                        &format!("Cannot read {}: {}", firmware_path, e),
+                    );
+                    return;
+                }
+            };
+
+            if let Some((serial_tx, serial_rx)) = state.clone_serial().await {
+                let _ = state.ws_tx.send(WsEvent::Log {
+                    message: format!(
+                        "Starting OTA for {}: {} ({} bytes)",
+                        target,
+                        firmware_path,
+                        firmware.len()
+                    ),
+                });
+
+                let state = state.clone();
+                tokio::spawn(async move {
+                    match beambench_pc::ota::stream_firmware(
+                        &firmware, role, &serial_tx, &serial_rx, &state.ws_tx,
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            let _ = state.ws_tx.send(WsEvent::OtaFinished);
+                            let _ = state.ws_tx.send(WsEvent::Log {
+                                message: "OTA complete — device will reboot".to_string(),
+                            });
+                        }
+                        Err(e) => {
+                            state.broadcast_error(&format!("OTA failed: {}", e), &e);
+                        }
+                    }
+                    state.ota_in_progress.store(false, Ordering::SeqCst);
+                });
+            } else {
+                state.ota_in_progress.store(false, Ordering::SeqCst);
+                state.broadcast_error(
+                    "OTA failed: not connected",
+                    "Not connected to serial/TCP",
+                );
             }
         }
         WsCommand::Jog { delta_deg } => {

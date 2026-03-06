@@ -7,7 +7,6 @@
 use beambench_protocol::Role;
 use defmt::info;
 use embedded_storage::{ReadStorage, Storage};
-use esp_hal::peripherals::FLASH;
 use esp_storage::FlashStorage;
 
 /// Magic bytes to distinguish a provisioned role from erased flash (0xFF).
@@ -23,18 +22,17 @@ const ROLE_RECORD_SIZE: usize = 8; // 4 magic + 1 role + 3 padding
 ///
 /// - If a `role-*` cargo feature is active, write that role to flash and return it.
 /// - Otherwise, read the role from flash.
-pub fn resolve_role(flash: FLASH) -> Role {
-    let mut storage = FlashStorage::new(flash);
+pub fn resolve_role(storage: &mut FlashStorage<'_>) -> Role {
 
     // Compile-time role from cargo feature (provisioning mode).
     let feature_role = feature_role();
 
     if let Some(role) = feature_role {
         info!("Provisioning role: {:?}", defmt::Debug2Format(&role));
-        write_role(&mut storage, role);
+        write_role(storage, role);
         role
     } else {
-        match read_role(&mut storage) {
+        match read_role(storage) {
             Some(role) => {
                 info!("Role from flash: {:?}", defmt::Debug2Format(&role));
                 role

@@ -40,17 +40,22 @@ pub async fn run(
     sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
     receiver: EspNowReceiver<'static>,
     led_signal: &'static Signal<NoopRawMutex, LedState>,
+    flash: &'static SharedFlash,
 ) -> ! {
     let motor_cmd = mk_static!(Signal<NoopRawMutex, MotorCmd>, Signal::new());
     let motor_result = mk_static!(Signal<NoopRawMutex, MotorResult>, Signal::new());
     let bridge_mac = mk_static!(Mutex<NoopRawMutex, Option<[u8; 6]>>, Mutex::new(None));
     let last_bridge_seen = mk_static!(Mutex<NoopRawMutex, Option<Instant>>, Mutex::new(None));
+    let ota = mk_static!(
+        Mutex<NoopRawMutex, crate::ota_responder::OtaState>,
+        Mutex::new(crate::ota_responder::OtaState::new())
+    );
 
     spawner
         .spawn(stepper_discovery_task(sender, bridge_mac, last_bridge_seen, manager, led_signal))
         .ok();
     spawner
-        .spawn(stepper_listener_task(manager, receiver, bridge_mac, last_bridge_seen, motor_cmd))
+        .spawn(stepper_listener_task(manager, sender, receiver, bridge_mac, last_bridge_seen, motor_cmd, flash, ota))
         .ok();
     spawner
         .spawn(stepper_responder_task(sender, bridge_mac, motor_result))
@@ -112,10 +117,13 @@ async fn stepper_discovery_task(
 #[embassy_executor::task]
 async fn stepper_listener_task(
     manager: &'static EspNowManager<'static>,
+    sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
     mut receiver: EspNowReceiver<'static>,
     bridge_mac: &'static Mutex<NoopRawMutex, Option<[u8; 6]>>,
     last_bridge_seen: &'static Mutex<NoopRawMutex, Option<Instant>>,
     motor_cmd: &'static Signal<NoopRawMutex, MotorCmd>,
+    flash: &'static SharedFlash,
+    ota: &'static Mutex<NoopRawMutex, crate::ota_responder::OtaState>,
 ) {
     loop {
         let received = receiver.receive_async().await;
@@ -157,6 +165,17 @@ async fn stepper_listener_task(
                         proto::TurntableCommand::Stop => {
                             info!("Received Stop");
                             motor_cmd.signal(MotorCmd::Stop);
+                        }
+                    }
+                }
+            }
+            Ok(ref espnow_msg) if crate::ota_responder::is_ota_message(espnow_msg) => {
+                if let Some(resp) = crate::ota_responder::handle_ota_message(espnow_msg, ota, flash).await {
+                    let mac = *bridge_mac.lock().await;
+                    if let Some(peer) = mac {
+                        crate::ota_responder::send_ota_response(sender, &peer, &resp).await;
+                        if matches!(resp, EspnowMessage::OtaComplete) {
+                            crate::ota_responder::schedule_reboot().await;
                         }
                     }
                 }
