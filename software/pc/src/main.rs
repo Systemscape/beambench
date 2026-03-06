@@ -1,8 +1,7 @@
 //! Beambench PC application — Axum server with WebSocket and embedded frontend.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::atomic::AtomicI32;
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 use axum::{
     Router,
@@ -29,11 +28,8 @@ const VERIFY_INITIAL_DELAY: std::time::Duration = std::time::Duration::from_mill
 /// devices quickly.
 const VERIFY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// Timeout for the ReturnHome completion response from the Bridge.
-const HOME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// Timeout for a single jog move to complete.
-const JOG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+/// Timeout for turntable move commands (ReturnHome, Jog).
+const MOVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Parser)]
 struct Args {
@@ -103,6 +99,51 @@ impl AppState {
             message: error_msg.to_string(),
         });
     }
+}
+
+type SerialTx = tokio::sync::mpsc::Sender<beambench_protocol::PcCommand>;
+type SerialRx = Arc<Mutex<tokio::sync::mpsc::Receiver<beambench_protocol::DeviceEvent>>>;
+
+impl AppState {
+    /// Clone the serial tx/rx handles if connected.
+    async fn clone_serial(&self) -> Option<(SerialTx, SerialRx)> {
+        let serial = self.serial.lock().await;
+        serial.as_ref().map(|h| (h.tx.clone(), h.rx.clone()))
+    }
+}
+
+/// Send a command and wait for a matching response, with timeout.
+/// Returns `Ok(event)` on match, `Err(description)` on protocol error or timeout.
+async fn send_and_wait_move(
+    serial_tx: &SerialTx,
+    serial_rx: &SerialRx,
+    cmd: beambench_protocol::PcCommand,
+) -> Result<f32, String> {
+    let _ = serial_tx.send(cmd).await;
+
+    tokio::time::timeout(MOVE_TIMEOUT, async {
+        let mut rx = serial_rx.lock().await;
+        loop {
+            match rx.recv().await {
+                Some(beambench_protocol::DeviceEvent::MoveComplete { angle_deg }) => {
+                    return Ok(angle_deg);
+                }
+                Some(beambench_protocol::DeviceEvent::HomeComplete) => {
+                    return Ok(0.0);
+                }
+                Some(beambench_protocol::DeviceEvent::StepperError { description }) => {
+                    return Err(description.to_string());
+                }
+                Some(beambench_protocol::DeviceEvent::Error { description }) => {
+                    return Err(description.to_string());
+                }
+                Some(_) => continue,
+                None => return Err("Serial connection lost".to_string()),
+            }
+        }
+    })
+    .await
+    .unwrap_or(Err("Move timed out — turntable may be stuck".to_string()))
 }
 
 #[tokio::main]
@@ -372,11 +413,7 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
             // Clear previous data.
             state.data.lock().await.clear();
 
-            let cloned = {
-                let serial = state.serial.lock().await;
-                serial.as_ref().map(|h| (h.tx.clone(), h.rx.clone()))
-            };
-            if let Some((serial_tx, serial_rx)) = cloned {
+            if let Some((serial_tx, serial_rx)) = state.clone_serial().await {
                 let state = state.clone();
 
                 let _ = state.ws_tx.send(WsEvent::Log {
@@ -459,73 +496,31 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
                 return;
             }
 
-            let cloned = {
-                let serial = state.serial.lock().await;
-                serial.as_ref().map(|h| (h.tx.clone(), h.rx.clone()))
-            };
-            if let Some((serial_tx, serial_rx)) = cloned {
+            if let Some((serial_tx, serial_rx)) = state.clone_serial().await {
                 let _ = state.ws_tx.send(WsEvent::Log {
                     message: "Returning to home position...".to_string(),
                 });
-                state.broadcast_status().await;
 
                 let state = state.clone();
                 tokio::spawn(async move {
-                    let _ = serial_tx.send(beambench_protocol::PcCommand::ReturnHome).await;
-
-                    let result = tokio::time::timeout(HOME_TIMEOUT, async {
-                        let mut rx = serial_rx.lock().await;
-                        loop {
-                            match rx.recv().await {
-                                Some(beambench_protocol::DeviceEvent::HomeComplete) => return Ok(()),
-                                Some(beambench_protocol::DeviceEvent::MoveComplete { angle_deg }) if angle_deg == 0.0 => return Ok(()),
-                                Some(beambench_protocol::DeviceEvent::StepperError { description }) => {
-                                    return Err(description.to_string());
-                                }
-                                Some(beambench_protocol::DeviceEvent::Error { description }) => {
-                                    return Err(description.to_string());
-                                }
-                                Some(_) => continue,
-                                None => return Err("Serial connection lost".to_string()),
-                            }
-                        }
-                    })
-                    .await;
-
-                    match result {
-                        Ok(Ok(())) => {
-                            tracing::info!("Turntable reached home");
-                            state.turntable_angle_cdeg.store(0, Ordering::SeqCst);
+                    match send_and_wait_move(&serial_tx, &serial_rx, beambench_protocol::PcCommand::ReturnHome).await {
+                        Ok(angle_deg) => {
+                            state.turntable_angle_cdeg.store((angle_deg * 100.0) as i32, Ordering::SeqCst);
                             let _ = state.ws_tx.send(WsEvent::HomeComplete);
                             let _ = state.ws_tx.send(WsEvent::Log {
                                 message: "Turntable reached home position".to_string(),
                             });
                         }
-                        Ok(Err(e)) => {
-                            tracing::warn!("ReturnHome error: {}", e);
-                            state.broadcast_error(
-                                &format!("ReturnHome failed: {}", e),
-                                &e,
-                            );
-                        }
-                        Err(_) => {
-                            tracing::warn!("ReturnHome timed out");
-                            state.broadcast_error(
-                                "ReturnHome timed out (30s)",
-                                "ReturnHome timed out — turntable may be stuck",
-                            );
+                        Err(e) => {
+                            state.broadcast_error(&format!("ReturnHome failed: {}", e), &e);
                         }
                     }
-
                     state.homing.store(false, Ordering::SeqCst);
                     state.broadcast_status().await;
                 });
             } else {
                 state.homing.store(false, Ordering::SeqCst);
-                state.broadcast_error(
-                    "ReturnHome failed: not connected",
-                    "Not connected to serial/TCP",
-                );
+                state.broadcast_error("ReturnHome failed: not connected", "Not connected to serial/TCP");
             }
         }
         WsCommand::Jog { delta_deg } => {
@@ -545,72 +540,30 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
             let current_cdeg = state.turntable_angle_cdeg.load(Ordering::SeqCst);
             let target_deg = (current_cdeg as f32 / 100.0) + delta_deg;
 
-            let cloned = {
-                let serial = state.serial.lock().await;
-                serial.as_ref().map(|h| (h.tx.clone(), h.rx.clone()))
-            };
-            if let Some((serial_tx, serial_rx)) = cloned {
+            if let Some((serial_tx, serial_rx)) = state.clone_serial().await {
                 let _ = state.ws_tx.send(WsEvent::Log {
                     message: format!("Jogging to {:.1}°", target_deg),
                 });
 
                 let state = state.clone();
                 tokio::spawn(async move {
-                    let _ = serial_tx
-                        .send(beambench_protocol::PcCommand::MoveTo { angle_deg: target_deg })
-                        .await;
-
-                    let result = tokio::time::timeout(JOG_TIMEOUT, async {
-                        let mut rx = serial_rx.lock().await;
-                        loop {
-                            match rx.recv().await {
-                                Some(beambench_protocol::DeviceEvent::MoveComplete { angle_deg }) => {
-                                    return Ok(angle_deg);
-                                }
-                                Some(beambench_protocol::DeviceEvent::StepperError { description }) => {
-                                    return Err(description.to_string());
-                                }
-                                Some(beambench_protocol::DeviceEvent::Error { description }) => {
-                                    return Err(description.to_string());
-                                }
-                                Some(_) => continue,
-                                None => return Err("Serial connection lost".to_string()),
-                            }
-                        }
-                    })
-                    .await;
-
-                    match result {
-                        Ok(Ok(angle_deg)) => {
-                            let cdeg = (angle_deg * 100.0) as i32;
-                            state.turntable_angle_cdeg.store(cdeg, Ordering::SeqCst);
+                    match send_and_wait_move(&serial_tx, &serial_rx, beambench_protocol::PcCommand::MoveTo { angle_deg: target_deg }).await {
+                        Ok(angle_deg) => {
+                            state.turntable_angle_cdeg.store((angle_deg * 100.0) as i32, Ordering::SeqCst);
                             let _ = state.ws_tx.send(WsEvent::Log {
                                 message: format!("Turntable at {:.1}°", angle_deg),
                             });
                             let _ = state.ws_tx.send(WsEvent::JogComplete { angle_deg });
                         }
-                        Ok(Err(e)) => {
-                            state.broadcast_error(
-                                &format!("Jog failed: {}", e),
-                                &e,
-                            );
-                        }
-                        Err(_) => {
-                            state.broadcast_error(
-                                "Jog timed out (15s)",
-                                "Jog timed out — turntable may be stuck",
-                            );
+                        Err(e) => {
+                            state.broadcast_error(&format!("Jog failed: {}", e), &e);
                         }
                     }
-
                     state.jogging.store(false, Ordering::SeqCst);
                 });
             } else {
                 state.jogging.store(false, Ordering::SeqCst);
-                state.broadcast_error(
-                    "Jog failed: not connected",
-                    "Not connected to serial/TCP",
-                );
+                state.broadcast_error("Jog failed: not connected", "Not connected to serial/TCP");
             }
         }
     }

@@ -10,7 +10,7 @@ use embassy_executor::Spawner;
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, mutex::Mutex, signal::Signal};
 use embassy_time::{Duration, Instant, Timer};
 use esp_radio::esp_now::{
-    EspNowManager, EspNowReceiver, EspNowSender, PeerInfo, BROADCAST_ADDRESS,
+    EspNowManager, EspNowReceiver, EspNowSender, BROADCAST_ADDRESS,
 };
 
 use beambench_protocol::{self as proto, EspnowMessage, Role};
@@ -79,21 +79,13 @@ async fn rx_discovery_task(
         // Check for stale bridge and unpair.
         {
             let mut s = state.lock().await;
-            if s.bridge_paired {
-                if let Some(last) = s.last_bridge_seen {
-                    if Instant::now() - last > HEARTBEAT_TIMEOUT {
-                        info!("Bridge heartbeat timeout, unpairing");
-                        let _ = manager.remove_peer(&s.bridge_mac);
-                        s.bridge_paired = false;
-                        s.last_bridge_seen = None;
-                    }
-                }
+            if s.bridge_paired && is_heartbeat_stale(s.last_bridge_seen) {
+                info!("Bridge heartbeat timeout, unpairing");
+                let _ = manager.remove_peer(&s.bridge_mac);
+                s.bridge_paired = false;
+                s.last_bridge_seen = None;
             }
-            if s.bridge_paired {
-                led_signal.signal(LedState::Solid(COLOR_GREEN));
-            } else {
-                led_signal.signal(LedState::Blink { color: COLOR_BLUE, period_ms: 500 });
-            }
+            signal_pairing_led(led_signal, s.bridge_paired);
         }
 
         let beacon = EspnowMessage::Hello(proto::HelloBeacon {
@@ -129,17 +121,7 @@ async fn rx_listener_task(
                     "Paired with Bridge {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
                     src[0], src[1], src[2], src[3], src[4], src[5]
                 );
-                if !manager.peer_exists(&src) {
-                    manager
-                        .add_peer(PeerInfo {
-                            interface: esp_radio::esp_now::EspNowWifiInterface::Sta,
-                            peer_address: src,
-                            lmk: None,
-                            channel: None,
-                            encrypt: false,
-                        })
-                        .unwrap();
-                }
+                ensure_peer(manager, &src);
                 let mut s = state.lock().await;
                 s.bridge_paired = true;
                 s.bridge_mac = src;
@@ -154,17 +136,7 @@ async fn rx_listener_task(
                         "Discovered Bridge at {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
                         src[0], src[1], src[2], src[3], src[4], src[5]
                     );
-                    if !manager.peer_exists(&src) {
-                        manager
-                            .add_peer(PeerInfo {
-                                interface: esp_radio::esp_now::EspNowWifiInterface::Sta,
-                                peer_address: src,
-                                lmk: None,
-                                channel: None,
-                                encrypt: false,
-                            })
-                            .unwrap();
-                    }
+                    ensure_peer(manager, &src);
                     s.bridge_paired = true;
                     s.bridge_mac = src;
                 }

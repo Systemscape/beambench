@@ -19,7 +19,7 @@ use esp_hal::{
     Async,
 };
 use esp_radio::esp_now::{
-    EspNowManager, EspNowReceiver, EspNowSender, PeerInfo, BROADCAST_ADDRESS,
+    EspNowManager, EspNowReceiver, EspNowSender, BROADCAST_ADDRESS,
 };
 
 use beambench_protocol::{self as proto, DeviceEvent, EspnowMessage, PcCommand, Role};
@@ -45,44 +45,35 @@ impl PeerTable {
         }
     }
 
-    fn peer_for_role(&self, role: Role) -> Option<[u8; 6]> {
+    fn entry(&self, role: Role) -> &Option<([u8; 6], Instant)> {
         match role {
-            Role::Rx => self.rx.map(|(mac, _)| mac),
-            Role::Tx => self.tx.map(|(mac, _)| mac),
-            Role::Turntable => self.turntable.map(|(mac, _)| mac),
-            Role::Bridge => None,
+            Role::Rx => &self.rx,
+            Role::Tx => &self.tx,
+            Role::Turntable => &self.turntable,
+            Role::Bridge => &None,
         }
+    }
+
+    fn entry_mut(&mut self, role: Role) -> &mut Option<([u8; 6], Instant)> {
+        match role {
+            Role::Rx => &mut self.rx,
+            Role::Tx => &mut self.tx,
+            Role::Turntable => &mut self.turntable,
+            Role::Bridge => unreachable!(),
+        }
+    }
+
+    fn peer_for_role(&self, role: Role) -> Option<[u8; 6]> {
+        self.entry(role).map(|(mac, _)| mac)
     }
 
     fn set_peer(&mut self, role: Role, mac: [u8; 6]) {
-        let entry = Some((mac, Instant::now()));
-        match role {
-            Role::Rx => self.rx = entry,
-            Role::Tx => self.tx = entry,
-            Role::Turntable => self.turntable = entry,
-            Role::Bridge => {}
-        }
+        *self.entry_mut(role) = Some((mac, Instant::now()));
     }
 
     fn update_seen(&mut self, role: Role) {
-        let now = Instant::now();
-        match role {
-            Role::Rx => {
-                if let Some((_, ref mut t)) = self.rx {
-                    *t = now;
-                }
-            }
-            Role::Tx => {
-                if let Some((_, ref mut t)) = self.tx {
-                    *t = now;
-                }
-            }
-            Role::Turntable => {
-                if let Some((_, ref mut t)) = self.turntable {
-                    *t = now;
-                }
-            }
-            Role::Bridge => {}
+        if let Some((_, t)) = self.entry_mut(role) {
+            *t = Instant::now();
         }
     }
 
@@ -288,23 +279,8 @@ async fn bridge_discovery_task(
         // Check for stale peers.
         {
             let mut p = peers.lock().await;
-            let now = Instant::now();
             for role in [Role::Rx, Role::Tx, Role::Turntable] {
-                let stale = match role {
-                    Role::Rx => p
-                        .rx
-                        .as_ref()
-                        .map_or(false, |(_, t)| now - *t > HEARTBEAT_TIMEOUT),
-                    Role::Tx => p
-                        .tx
-                        .as_ref()
-                        .map_or(false, |(_, t)| now - *t > HEARTBEAT_TIMEOUT),
-                    Role::Turntable => p
-                        .turntable
-                        .as_ref()
-                        .map_or(false, |(_, t)| now - *t > HEARTBEAT_TIMEOUT),
-                    Role::Bridge => false,
-                };
+                let stale = p.entry(role).map_or(false, |(_, t)| is_heartbeat_stale(Some(t)));
                 if stale {
                     if let Some(mac) = p.peer_for_role(role) {
                         info!(
@@ -313,23 +289,11 @@ async fn bridge_discovery_task(
                         );
                         let _ = manager.remove_peer(&mac);
                     }
-                    match role {
-                        Role::Rx => p.rx = None,
-                        Role::Tx => p.tx = None,
-                        Role::Turntable => p.turntable = None,
-                        Role::Bridge => {}
-                    }
+                    *p.entry_mut(role) = None;
                 }
             }
 
-            if p.all_connected() {
-                led_signal.signal(LedState::Solid(COLOR_GREEN));
-            } else {
-                led_signal.signal(LedState::Blink {
-                    color: COLOR_BLUE,
-                    period_ms: 500,
-                });
-            }
+            signal_pairing_led(led_signal, p.all_connected());
         }
 
         // Broadcast discovery beacon.
@@ -371,19 +335,7 @@ async fn bridge_listener_task(
                         defmt::Debug2Format(&role),
                         src[0], src[1], src[2], src[3], src[4], src[5]
                     );
-
-                    if !manager.peer_exists(&src) {
-                        manager
-                            .add_peer(PeerInfo {
-                                interface: esp_radio::esp_now::EspNowWifiInterface::Sta,
-                                peer_address: src,
-                                lmk: None,
-                                channel: None,
-                                encrypt: false,
-                            })
-                            .unwrap();
-                    }
-
+                    ensure_peer(manager, &src);
                     peers.lock().await.set_peer(role, src);
                 } else {
                     peers.lock().await.update_seen(role);
@@ -400,22 +352,18 @@ async fn bridge_listener_task(
                     let _ = s.send_async(&src, resp_data).await;
                 }
             }
-            Ok(ref espnow_msg @ EspnowMessage::TurntableResp(_)) => {
-                peers.lock().await.update_seen(Role::Turntable);
-                if let Some(event) = bridge_logic::translate_response(espnow_msg) {
-                    event_tx.send(event).await;
-                }
-            }
-            Ok(ref espnow_msg @ EspnowMessage::TxResp(_)) => {
-                peers.lock().await.update_seen(Role::Tx);
-                if let Some(event) = bridge_logic::translate_response(espnow_msg) {
-                    event_tx.send(event).await;
-                }
-            }
-            Ok(ref espnow_msg @ EspnowMessage::MeasurementResult { .. }) => {
-                peers.lock().await.update_seen(Role::Rx);
-                if let Some(event) = bridge_logic::translate_response(espnow_msg) {
-                    event_tx.send(event).await;
+            Ok(ref espnow_msg) => {
+                let role = match espnow_msg {
+                    EspnowMessage::TurntableResp(_) => Some(Role::Turntable),
+                    EspnowMessage::TxResp(_) => Some(Role::Tx),
+                    EspnowMessage::MeasurementResult { .. } => Some(Role::Rx),
+                    _ => None,
+                };
+                if let Some(role) = role {
+                    peers.lock().await.update_seen(role);
+                    if let Some(event) = bridge_logic::translate_response(espnow_msg) {
+                        event_tx.send(event).await;
+                    }
                 }
             }
             _ => {}

@@ -3,8 +3,6 @@
 //! Speaks postcard+COBS using PcCommand/DeviceEvent, generates synthetic
 //! antenna patterns so you can test the full PC pipeline without hardware.
 
-use std::sync::Arc;
-
 use beambench_protocol::{DeviceEvent, PcCommand, MAX_MSG_SIZE};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
@@ -19,13 +17,9 @@ pub async fn handle_connection(stream: tokio::net::TcpStream) {
     tokio::spawn(cobs_writer(writer, resp_rx));
 
     let mut transmitting = false;
-    let mut measuring = false;
     let mut rssi_sum: f32 = 0.0;
     let mut rssi_count: u16 = 0;
     let mut current_angle: f32 = 0.0;
-
-    // Simulated beacon generator — sends synthetic RSSI samples while transmitting + measuring.
-    let beacon_notify = Arc::new(tokio::sync::Notify::new());
 
     loop {
         let cmd = match cmd_rx.recv().await {
@@ -65,14 +59,12 @@ pub async fn handle_connection(stream: tokio::net::TcpStream) {
                 let _ = resp_tx.send(DeviceEvent::HomeComplete).await;
             }
             PcCommand::StartMeasurement => {
-                measuring = true;
                 rssi_sum = 0.0;
                 rssi_count = 0;
 
                 // Simulate beacon reception: generate synthetic RSSI samples.
                 if transmitting {
                     let rssi = synthetic_rssi(current_angle);
-                    // Simulate receiving several beacons.
                     let n = 10u16;
                     rssi_sum = rssi * n as f32;
                     rssi_count = n;
@@ -84,7 +76,6 @@ pub async fn handle_connection(stream: tokio::net::TcpStream) {
                 } else {
                     (-100.0, 0)
                 };
-                measuring = false;
                 let _ = resp_tx
                     .send(DeviceEvent::Measurement {
                         rssi_dbm,

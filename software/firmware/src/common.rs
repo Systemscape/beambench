@@ -74,3 +74,43 @@ macro_rules! mk_static {
 pub const DEFAULT_CHANNEL: u8 = 11;
 pub const BEACON_INTERVAL: Duration = Duration::from_secs(1);
 pub const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(15);
+
+// ── Shared helpers ──────────────────────────────────────────────────────────
+
+/// Add an ESP-NOW peer if not already registered.
+pub fn ensure_peer(manager: &esp_radio::esp_now::EspNowManager, mac: &[u8; 6]) {
+    if !manager.peer_exists(mac) {
+        manager
+            .add_peer(esp_radio::esp_now::PeerInfo {
+                interface: esp_radio::esp_now::EspNowWifiInterface::Sta,
+                peer_address: *mac,
+                lmk: None,
+                channel: None,
+                encrypt: false,
+            })
+            .unwrap();
+    }
+}
+
+/// Signal LED to reflect pairing state: solid green when paired, blinking blue otherwise.
+pub fn signal_pairing_led(
+    led_signal: &Signal<NoopRawMutex, LedState>,
+    paired: bool,
+) {
+    if paired {
+        led_signal.signal(LedState::Solid(COLOR_GREEN));
+    } else {
+        led_signal.signal(LedState::Blink {
+            color: COLOR_BLUE,
+            period_ms: 500,
+        });
+    }
+}
+
+/// Check whether a heartbeat timestamp has expired.
+pub fn is_heartbeat_stale(last_seen: Option<embassy_time::Instant>) -> bool {
+    match last_seen {
+        Some(t) => embassy_time::Instant::now() - t > HEARTBEAT_TIMEOUT,
+        None => false,
+    }
+}
