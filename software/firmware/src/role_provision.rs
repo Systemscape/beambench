@@ -1,30 +1,40 @@
 //! Role provisioning: read/write the device role from/to flash.
 //!
-//! Uses a fixed address in the NVS flash region. The role is stored as a
-//! single byte with a 4-byte magic prefix for validation.
+//! Uses a fixed offset in the `role` flash partition (0xF000). The role is
+//! stored as 8 bytes: 4-byte magic prefix + 1 role byte + 3 padding bytes.
+//! Flash reads/writes must be 4-byte aligned.
 
 use beambench_protocol::Role;
 use defmt::info;
+use embedded_storage::{ReadStorage, Storage};
+use esp_hal::peripherals::FLASH;
+use esp_storage::FlashStorage;
 
 /// Magic bytes to distinguish a provisioned role from erased flash (0xFF).
-/// Used by the real flash implementation (not yet implemented).
-#[allow(dead_code)]
 const MAGIC: [u8; 4] = [0xBE, 0xA1, 0x01, 0x00]; // "bea1" + version 0
+
+/// Flash offset for the role partition (matches partition table in architecture-v2.md).
+const ROLE_OFFSET: u32 = 0xF000;
+
+/// Total size of the role record in flash (must be 4-byte aligned).
+const ROLE_RECORD_SIZE: usize = 8; // 4 magic + 1 role + 3 padding
 
 /// Determine the device role at boot.
 ///
 /// - If a `role-*` cargo feature is active, write that role to flash and return it.
 /// - Otherwise, read the role from flash.
-pub fn resolve_role() -> Role {
+pub fn resolve_role(flash: FLASH) -> Role {
+    let mut storage = FlashStorage::new(flash);
+
     // Compile-time role from cargo feature (provisioning mode).
     let feature_role = feature_role();
 
     if let Some(role) = feature_role {
         info!("Provisioning role: {:?}", defmt::Debug2Format(&role));
-        write_role(role);
+        write_role(&mut storage, role);
         role
     } else {
-        match read_role() {
+        match read_role(&mut storage) {
             Some(role) => {
                 info!("Role from flash: {:?}", defmt::Debug2Format(&role));
                 role
@@ -65,28 +75,32 @@ fn feature_role() -> Option<Role> {
 }
 
 // ── Flash read/write ────────────────────────────────────────────────────────
-//
-// TODO: Replace with actual flash read/write using esp-storage or NVS when
-// available for esp-hal. For now, we use a static mut as a placeholder that
-// works for the provisioning flow (role is set at compile time via feature).
-//
-// The real implementation will:
-// 1. Use `esp_storage::FlashStorage` to read/write a fixed offset in the NVS partition
-// 2. Write: MAGIC ++ role_byte (5 bytes total)
-// 3. Read: verify MAGIC, then parse role_byte
 
-static STORED_ROLE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0xFF);
-static STORED_MAGIC: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+fn write_role(storage: &mut FlashStorage<'_>, role: Role) {
+    let mut buf = [0u8; ROLE_RECORD_SIZE];
+    buf[..4].copy_from_slice(&MAGIC);
+    buf[4] = role.to_byte();
+    // buf[5..8] stays zero (padding)
 
-fn write_role(role: Role) {
-    STORED_ROLE.store(role.to_byte(), core::sync::atomic::Ordering::SeqCst);
-    STORED_MAGIC.store(true, core::sync::atomic::Ordering::SeqCst);
-    info!("Role written to flash (placeholder)");
+    // Erase the sector before writing (flash can only clear bits, not set them).
+    if let Err(e) = storage.write(ROLE_OFFSET, &buf) {
+        defmt::error!("Failed to write role to flash: {:?}", defmt::Debug2Format(&e));
+        return;
+    }
+    info!("Role written to flash at 0x{:X}", ROLE_OFFSET);
 }
 
-fn read_role() -> Option<Role> {
-    if !STORED_MAGIC.load(core::sync::atomic::Ordering::SeqCst) {
+fn read_role(storage: &mut FlashStorage<'_>) -> Option<Role> {
+    let mut buf = [0u8; ROLE_RECORD_SIZE];
+    if let Err(e) = storage.read(ROLE_OFFSET, &mut buf) {
+        defmt::error!("Failed to read role from flash: {:?}", defmt::Debug2Format(&e));
         return None;
     }
-    Role::from_byte(STORED_ROLE.load(core::sync::atomic::Ordering::SeqCst))
+
+    if buf[..4] != MAGIC {
+        info!("No valid role magic at 0x{:X}", ROLE_OFFSET);
+        return None;
+    }
+
+    Role::from_byte(buf[4])
 }

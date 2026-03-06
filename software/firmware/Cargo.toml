@@ -25,6 +25,7 @@ esp-hal = { version = "1.0.0", features = ["esp32c3", "unstable", "defmt"] }
 esp-rtos = { version = "0.2.0", features = ["esp32c3", "embassy", "esp-radio", "defmt"] }
 esp-radio = { version = "0.17.0", features = ["esp32c3", "esp-now", "defmt", "esp-alloc", "unstable"] }
 esp-alloc = "0.9.0"
+esp-storage = { version = "0.8.1", features = ["esp32c3", "defmt"] }
 esp-backtrace = { version = "0.18.1", features = ["esp32c3", "panic-handler", "defmt"] }
 esp-bootloader-esp-idf = { version = "0.4.0", features = ["esp32c3", "defmt"] }
 
@@ -46,6 +47,9 @@ smart-leds = "0.4.0"
 # Serial (bridge/rx roles)
 embedded-io = "0.7.1"
 embedded-io-async = "0.7"
+
+# Flash storage (role provisioning)
+embedded-storage = "0.3"
 
 # Serialization
 postcard = { version = "1", features = ["experimental-derive"] }

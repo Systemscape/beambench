@@ -57,7 +57,7 @@ async fn main(spawner: Spawner) -> ! {
 
     // ── Resolve role ─────────────────────────────────────────────────────────
 
-    let role = role_provision::resolve_role();
+    let role = role_provision::resolve_role(peripherals.FLASH);
     info!("Booting as {:?}", defmt::Debug2Format(&role));
 
     // ── RTOS + Embassy setup ─────────────────────────────────────────────────
