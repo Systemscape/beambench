@@ -131,7 +131,7 @@ async fn main(spawner: Spawner) -> ! {
             let (usb_rx, usb_tx) = usb_serial.split();
             let usb_rx = mk_static!(UsbSerialJtagRx<'static, Async>, usb_rx);
             let usb_tx = mk_static!(UsbSerialJtagTx<'static, Async>, usb_tx);
-            bridge::run(spawner, manager, sender, receiver, led_signal, usb_rx, usb_tx, flash).await;
+            bridge::run(spawner, manager, sender, receiver, led_signal, usb_rx, usb_tx).await;
         }
         Role::Rx => {
             rx::run(spawner, manager, sender, receiver, led_signal, flash).await;

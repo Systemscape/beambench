@@ -171,13 +171,8 @@ async fn tx_listener_task(
                 }
             }
             Ok(ref espnow_msg) if crate::ota_responder::is_ota_message(espnow_msg) => {
-                if let Some(resp) = crate::ota_responder::handle_ota_message(espnow_msg, ota, flash).await {
-                    let bridge_mac = state.lock().await.bridge_mac;
-                    crate::ota_responder::send_ota_response(sender, &bridge_mac, &resp).await;
-                    if matches!(resp, EspnowMessage::OtaComplete) {
-                        crate::ota_responder::schedule_reboot().await;
-                    }
-                }
+                let bridge_mac = state.lock().await.bridge_mac;
+                crate::ota_responder::process_and_respond(espnow_msg, ota, flash, sender, &bridge_mac).await;
             }
             _ => {}
         }

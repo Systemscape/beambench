@@ -18,20 +18,15 @@ use crate::common::SharedFlash;
 const CHUNK_SIZE: u32 = 240;
 
 /// Active OTA session state.
-#[allow(dead_code)]
 struct OtaSession {
     /// Absolute flash offset of the target OTA partition.
     partition_offset: u32,
     /// Size of the target OTA partition.
     partition_size: u32,
-    /// Expected total firmware size from OtaBegin.
-    total_size: u32,
     /// Expected SHA-256 hash from OtaBegin.
     expected_sha256: [u8; 32],
     /// Running SHA-256 hasher.
     hasher: Sha256,
-    /// Whether to write to ota_0 (false) or ota_1 (true).
-    use_slot1: bool,
 }
 
 /// OTA responder state — `None` when idle, `Some` during an active update.
@@ -78,8 +73,26 @@ pub fn is_ota_message(msg: &EspnowMessage) -> bool {
     )
 }
 
+/// Handle an OTA message, send the response to the Bridge, and reboot if complete.
+///
+/// Call this from each role's listener task when `is_ota_message()` returns true.
+pub async fn process_and_respond(
+    msg: &EspnowMessage,
+    ota: &Mutex<NoopRawMutex, OtaState>,
+    flash: &SharedFlash,
+    sender: &Mutex<NoopRawMutex, EspNowSender<'static>>,
+    bridge_mac: &[u8; 6],
+) {
+    if let Some(resp) = handle_ota_message(msg, ota, flash).await {
+        send_ota_response(sender, bridge_mac, &resp).await;
+        if matches!(resp, EspnowMessage::OtaComplete) {
+            schedule_reboot().await;
+        }
+    }
+}
+
 /// Send an OTA response back to the Bridge.
-pub async fn send_ota_response(
+async fn send_ota_response(
     sender: &Mutex<NoopRawMutex, EspNowSender<'static>>,
     bridge_mac: &[u8; 6],
     msg: &EspnowMessage,
@@ -132,17 +145,17 @@ async fn handle_begin(
     // Determine which slot is currently booted (by checking otadata).
     // If we can't determine, default to writing to ota_0.
     let booted = pt.booted_partition();
-    let (target_offset, target_size, use_slot1) = match booted {
+    let (target_offset, target_size) = match booted {
         Ok(Some(entry))
             if entry.partition_type()
                 == partitions::PartitionType::App(partitions::AppPartitionSubType::Ota0) =>
         {
             // Currently on ota_0, write to ota_1.
-            (ota1.offset(), ota1.len(), true)
+            (ota1.offset(), ota1.len())
         }
         _ => {
             // Currently on ota_1 or factory/unknown, write to ota_0.
-            (ota0.offset(), ota0.len(), false)
+            (ota0.offset(), ota0.len())
         }
     };
 
@@ -156,8 +169,7 @@ async fn handle_begin(
     }
 
     info!(
-        "Writing to ota_{} at offset 0x{:X} ({} bytes available)",
-        if use_slot1 { 1 } else { 0 },
+        "Writing to OTA slot at offset 0x{:X} ({} bytes available)",
         target_offset,
         target_size
     );
@@ -169,10 +181,8 @@ async fn handle_begin(
     state.session = Some(OtaSession {
         partition_offset: target_offset,
         partition_size: target_size,
-        total_size,
         expected_sha256: sha256,
         hasher: Sha256::new(),
-        use_slot1,
     });
 
     Some(EspnowMessage::OtaReady)

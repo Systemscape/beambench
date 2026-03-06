@@ -93,8 +93,9 @@ pub async fn stream_firmware(
         .await
         .map_err(|e| format!("Chunk {}/{}: {}", seq + 1, total_chunks, e))?;
 
-        // Progress update every 10 chunks + on the last chunk.
-        if i % 10 == 0 || i == total_chunks - 1 {
+        // Progress update every ~1% + on the last chunk.
+        let progress_interval = (total_chunks / 100).max(1);
+        if i % progress_interval == 0 || i == total_chunks - 1 {
             let _ = ws_tx.send(WsEvent::OtaProgress {
                 chunks_sent: seq + 1,
                 total_chunks: total_chunks as u16,

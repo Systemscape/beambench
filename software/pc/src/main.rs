@@ -492,9 +492,9 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
             // CSV export is available via REST endpoint.
         }
         WsCommand::ReturnHome => {
-            if state.sweeping.load(Ordering::SeqCst) {
+            if state.sweeping.load(Ordering::SeqCst) || state.ota_in_progress.load(Ordering::SeqCst) {
                 let _ = state.ws_tx.send(WsEvent::Error {
-                    message: "Cannot return home while sweep is in progress".to_string(),
+                    message: "Cannot return home while sweep or OTA is in progress".to_string(),
                 });
                 return;
             }
@@ -557,7 +557,7 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
                 }
             };
 
-            let firmware = match std::fs::read(&firmware_path) {
+            let firmware = match tokio::fs::read(&firmware_path).await {
                 Ok(data) => data,
                 Err(e) => {
                     state.ota_in_progress.store(false, Ordering::SeqCst);
@@ -607,9 +607,9 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
             }
         }
         WsCommand::Jog { delta_deg } => {
-            if state.sweeping.load(Ordering::SeqCst) || state.homing.load(Ordering::SeqCst) {
+            if state.sweeping.load(Ordering::SeqCst) || state.homing.load(Ordering::SeqCst) || state.ota_in_progress.load(Ordering::SeqCst) {
                 let _ = state.ws_tx.send(WsEvent::Error {
-                    message: "Cannot jog while sweep or homing is in progress".to_string(),
+                    message: "Cannot jog while sweep, homing, or OTA is in progress".to_string(),
                 });
                 return;
             }

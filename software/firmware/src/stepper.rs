@@ -170,14 +170,8 @@ async fn stepper_listener_task(
                 }
             }
             Ok(ref espnow_msg) if crate::ota_responder::is_ota_message(espnow_msg) => {
-                if let Some(resp) = crate::ota_responder::handle_ota_message(espnow_msg, ota, flash).await {
-                    let mac = *bridge_mac.lock().await;
-                    if let Some(peer) = mac {
-                        crate::ota_responder::send_ota_response(sender, &peer, &resp).await;
-                        if matches!(resp, EspnowMessage::OtaComplete) {
-                            crate::ota_responder::schedule_reboot().await;
-                        }
-                    }
+                if let Some(peer) = *bridge_mac.lock().await {
+                    crate::ota_responder::process_and_respond(espnow_msg, ota, flash, sender, &peer).await;
                 }
             }
             _ => {}

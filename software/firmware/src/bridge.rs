@@ -107,7 +107,6 @@ pub async fn run(
     led_signal: &'static Signal<NoopRawMutex, LedState>,
     usb_rx: &'static mut UsbSerialJtagRx<'static, Async>,
     usb_tx: &'static mut UsbSerialJtagTx<'static, Async>,
-    _flash: &'static crate::common::SharedFlash,
 ) -> ! {
     let peers = mk_static!(
         Mutex::<NoopRawMutex, PeerTable>,
@@ -363,22 +362,22 @@ async fn bridge_listener_task(
                 }
             }
             Ok(ref espnow_msg) => {
-                // Identify the source role to update heartbeat.
-                let role = match espnow_msg {
-                    EspnowMessage::TurntableResp(_) => Some(Role::Turntable),
-                    EspnowMessage::TxResp(_) => Some(Role::Tx),
-                    EspnowMessage::MeasurementResult { .. } => Some(Role::Rx),
-                    // OTA responses: look up role by source MAC.
-                    EspnowMessage::OtaReady
-                    | EspnowMessage::OtaAck { .. }
-                    | EspnowMessage::OtaComplete
-                    | EspnowMessage::OtaError { .. } => {
-                        peers.lock().await.role_for_mac(&src)
+                // Update heartbeat for the source role (single lock scope).
+                {
+                    let mut p = peers.lock().await;
+                    let role = match espnow_msg {
+                        EspnowMessage::TurntableResp(_) => Some(Role::Turntable),
+                        EspnowMessage::TxResp(_) => Some(Role::Tx),
+                        EspnowMessage::MeasurementResult { .. } => Some(Role::Rx),
+                        EspnowMessage::OtaReady
+                        | EspnowMessage::OtaAck { .. }
+                        | EspnowMessage::OtaComplete
+                        | EspnowMessage::OtaError { .. } => p.role_for_mac(&src),
+                        _ => None,
+                    };
+                    if let Some(role) = role {
+                        p.update_seen(role);
                     }
-                    _ => None,
-                };
-                if let Some(role) = role {
-                    peers.lock().await.update_seen(role);
                 }
                 if let Some(event) = bridge_logic::translate_response(espnow_msg) {
                     event_tx.send(event).await;
