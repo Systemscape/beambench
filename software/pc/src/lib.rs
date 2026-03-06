@@ -35,13 +35,20 @@ pub struct TxConfig {
     pub packet_rate_hz: u16,
 }
 
-/// Current system status.
+/// Current system status broadcast to all WebSocket clients on state changes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SystemStatus {
+    /// Whether an antenna pattern sweep is in progress.
     pub sweeping: bool,
+    /// Whether the TX ESP32 is paired via ESP-NOW. Only meaningful when
+    /// `serial_connected` is `true` — otherwise the value may be stale.
     pub tx_connected: bool,
+    /// Whether the turntable ESP32 is paired via ESP-NOW. Only meaningful
+    /// when `serial_connected` is `true`.
     pub turntable_connected: bool,
+    /// Whether the PC is connected to the RX board over serial/TCP.
     pub serial_connected: bool,
+    /// Number of data points stored on the backend.
     pub data_points: usize,
 }
 
@@ -56,10 +63,17 @@ pub struct PortInfo {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum WsEvent {
+    /// A new measurement data point arrived during a sweep.
     DataPoint(DataPoint),
+    /// The sweep finished successfully; all data points have been sent.
     SweepComplete,
+    /// Turntable reached the home (0°) position after a ReturnHome command.
+    HomeComplete,
+    /// Full system status snapshot (sent on connect and on every state change).
     Status(SystemStatus),
+    /// An error occurred (displayed as a transient banner in the UI).
     Error { message: String },
+    /// Informational log message (appended to the log panel).
     Log { message: String },
 }
 
@@ -67,14 +81,23 @@ pub enum WsEvent {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum WsCommand {
+    /// Start a new antenna pattern sweep with the given configuration.
     StartSweep(SweepConfig),
+    /// Forward TX radio configuration to the TX board via the RX bridge.
     ConfigureTx(TxConfig),
+    /// Abort the current sweep immediately.
     Stop,
+    /// Request a fresh status snapshot from the RX board.
     QueryStatus,
+    /// List available serial ports (response sent via REST, not WS).
     ListPorts,
+    /// Open a serial/TCP connection to the given port.
     Connect { port: String },
+    /// Close the current serial/TCP connection.
     Disconnect,
+    /// Export measurement data as CSV (available via REST endpoint).
     ExportCsv,
+    /// Return the turntable to its home (0°) position.
     ReturnHome,
 }
 
@@ -172,6 +195,7 @@ mod tests {
     #[test]
     fn ws_event_json_round_trip() {
         json_round_trip(&WsEvent::SweepComplete);
+        json_round_trip(&WsEvent::HomeComplete);
         json_round_trip(&WsEvent::Error {
             message: "test error".to_string(),
         });

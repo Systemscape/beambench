@@ -11,6 +11,7 @@
     let plotDiv: HTMLDivElement;
     let Plotly: typeof import('plotly.js-dist-min');
 
+    /** An archived sweep result, shown as a named trace on the polar plot. */
     type Measurement = {
         id: number;
         name: string;
@@ -54,6 +55,22 @@
     let stepDeg = $state(5);
     let samplesPerAngle = $state(10);
 
+    // UX transient states
+    let connecting = $state(false);
+    let stopping = $state(false);
+    let homing = $state(false);
+
+    /** Client-side mirror of SweepConfig::validate(). */
+    let configError: string | null = $derived.by(() => {
+        if (stepDeg <= 0) return 'Step size must be positive';
+        if (startDeg >= stopDeg) return 'Start angle must be less than stop angle';
+        if (samplesPerAngle < 1) return 'Samples per angle must be at least 1';
+        return null;
+    });
+
+    /** Current turntable angle (from the last DataPoint received). */
+    let currentAngle: number | null = $state(null);
+
     let ws: ReturnType<typeof createWsConnection> | null = null;
 
     function addLog(msg: string) {
@@ -68,6 +85,7 @@
         });
     }
 
+    /** Move active data into the measurements list as a named sweep. */
     function archiveActive() {
         if (activeData.length === 0) return;
         measurements = [
@@ -84,6 +102,7 @@
         activeData = [];
     }
 
+    /** Dispatch a server-sent WebSocket event to update local state and UI. */
     function handleEvent(event: WsEvent) {
         switch (event.type) {
             case 'DataPoint':
@@ -95,15 +114,23 @@
                         sample_count: event.sample_count
                     }
                 ];
+                currentAngle = event.angle_deg;
                 updatePlot();
                 break;
             case 'SweepComplete':
                 status = { ...status, sweeping: false };
+                stopping = false;
+                currentAngle = null;
                 archiveActive();
                 updatePlot();
                 addLog('Sweep complete');
                 break;
+            case 'HomeComplete':
+                homing = false;
+                addLog('Turntable reached home position');
+                break;
             case 'Status':
+                connecting = false;
                 status = {
                     sweeping: event.sweeping,
                     tx_connected: event.tx_connected,
@@ -111,8 +138,12 @@
                     serial_connected: event.serial_connected,
                     data_points: event.data_points
                 };
+                if (!event.sweeping) stopping = false;
                 break;
             case 'Error':
+                connecting = false;
+                stopping = false;
+                homing = false;
                 errorMessage = event.message;
                 addLog(`Error: ${event.message}`);
                 setTimeout(() => {
@@ -131,6 +162,25 @@
         void measurements.map((m) => m.visible);
         updatePlot();
     });
+
+    /** Build a Plotly scatterpolar trace object from data points. */
+    function buildTrace(
+        data: DataPoint[],
+        floor: number,
+        name: string,
+        color: string,
+        opts: { lineWidth?: number; markerSize?: number } = {}
+    ): Record<string, unknown> {
+        return {
+            type: 'scatterpolar' as const,
+            mode: 'lines+markers' as const,
+            r: data.map((d) => Math.max(0, d.rssi_dbm - floor)),
+            theta: data.map((d) => d.angle_deg),
+            name,
+            line: { color, width: opts.lineWidth ?? 1.5 },
+            marker: { size: opts.markerSize ?? 3, color }
+        };
+    }
 
     function updatePlot() {
         if (!Plotly || !plotDiv) return;
@@ -177,28 +227,17 @@
 
         for (const m of measurements) {
             if (!m.visible) continue;
-            traces.push({
-                type: 'scatterpolar' as const,
-                mode: 'lines+markers' as const,
-                r: m.data.map((d) => Math.max(0, d.rssi_dbm - floor)),
-                theta: m.data.map((d) => d.angle_deg),
-                name: m.name,
-                line: { color: m.color, width: 1.5 },
-                marker: { size: 3, color: m.color }
-            });
+            traces.push(buildTrace(m.data, floor, m.name, m.color));
         }
 
         if (activeData.length > 0) {
             const activeColor = COLORS[(nextId - 1) % COLORS.length];
-            traces.push({
-                type: 'scatterpolar' as const,
-                mode: 'lines+markers' as const,
-                r: activeData.map((d) => Math.max(0, d.rssi_dbm - floor)),
-                theta: activeData.map((d) => d.angle_deg),
-                name: `Sweep ${nextId} (active)`,
-                line: { color: activeColor, width: 2 },
-                marker: { size: 4, color: activeColor }
-            });
+            traces.push(
+                buildTrace(activeData, floor, `Sweep ${nextId} (active)`, activeColor, {
+                    lineWidth: 2,
+                    markerSize: 4
+                })
+            );
         }
 
         const layout = {
@@ -237,6 +276,7 @@
 
     function connectSerial() {
         if (selectedPort) {
+            connecting = true;
             ws?.send({ type: 'Connect', port: selectedPort });
         }
     }
@@ -257,10 +297,12 @@
     }
 
     function stopSweep() {
+        stopping = true;
         ws?.send({ type: 'Stop' });
     }
 
     function returnHome() {
+        homing = true;
         ws?.send({ type: 'ReturnHome' });
     }
 
@@ -330,8 +372,10 @@
                     {#if status.serial_connected}
                         <button onclick={disconnectSerial}>Disconnect</button>
                     {:else}
-                        <button onclick={connectSerial} disabled={!selectedPort}
-                            >Connect</button>
+                        <button
+                            onclick={connectSerial}
+                            disabled={!selectedPort || connecting}
+                            >{connecting ? 'Connecting...' : 'Connect'}</button>
                     {/if}
                     <button class="secondary" onclick={fetchPorts}
                         >Refresh</button>
@@ -376,10 +420,13 @@
                         bind:value={samplesPerAngle}
                         min="1" />
                 </div>
+                {#if configError}
+                    <p class="validation-error">{configError}</p>
+                {/if}
                 <div class="button-row">
                     <button
                         onclick={startSweep}
-                        disabled={!status.serial_connected || status.sweeping}>
+                        disabled={!status.serial_connected || status.sweeping || homing || !!configError}>
                         Start Sweep
                     </button>
                 </div>
@@ -387,17 +434,23 @@
                     <button
                         class="danger"
                         onclick={stopSweep}
-                        disabled={!status.sweeping}>
-                        Stop
+                        disabled={!status.sweeping || stopping}>
+                        {stopping ? 'Stopping...' : 'Stop'}
                     </button>
                     <button
                         class="secondary"
                         onclick={returnHome}
-                        disabled={!status.serial_connected || status.sweeping}>
-                        Home
+                        disabled={!status.serial_connected || status.sweeping || homing}>
+                        {homing ? 'Homing...' : 'Home'}
                     </button>
                 </div>
-                <p class="info">{activeData.length} data points</p>
+                <p class="info">
+                    {#if status.sweeping && currentAngle !== null}
+                        {activeData.length} points &mdash; {currentAngle.toFixed(1)}&deg;
+                    {:else}
+                        {activeData.length} data points
+                    {/if}
+                </p>
             </section>
 
             <section>
@@ -632,6 +685,12 @@
         background: #111;
         border-color: #4caf50;
         color: #4caf50;
+    }
+
+    .validation-error {
+        font-size: 0.8rem;
+        color: #e53935;
+        margin: 0.25rem 0;
     }
 
     .info {

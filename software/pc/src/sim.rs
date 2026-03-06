@@ -100,7 +100,8 @@ pub async fn handle_connection(stream: tokio::net::TcpStream) {
                 }
             }
             PcToRx::ReturnHome => {
-                // Sim: no motor to move, ignore.
+                // Sim: pretend turntable reached home instantly.
+                let _ = resp_tx.send(RxToPc::HomeComplete).await;
             }
         }
     }

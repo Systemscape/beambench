@@ -8,10 +8,21 @@ use tokio::sync::{Mutex, mpsc};
 use tokio_serial::SerialPortBuilderExt;
 use tracing::{debug, error, info, warn};
 
+/// Baud rate for the USB-serial connection to the RX board.
 const BAUD_RATE: u32 = 115_200;
+
+/// Buffer size for COBS frame encoding/decoding.
 const COBS_BUF_SIZE: usize = 512;
 
-/// Handle to a serial connection. Runs reader/writer tasks in the background.
+/// Maximum accumulation buffer size before resetting. Guards against unbounded
+/// growth if COBS delimiters are missing (e.g. noise on the line).
+const MAX_ACCUM_SIZE: usize = 1024;
+
+/// Handle to an active serial (or TCP) connection to the RX board.
+///
+/// Spawns background reader/writer tasks that bridge between typed channels
+/// and the raw COBS-framed byte stream. Drop or call [`close()`](Self::close)
+/// to shut down both tasks.
 pub struct SerialHandle {
     pub tx: mpsc::Sender<PcToRx>,
     pub rx: Arc<Mutex<mpsc::Receiver<RxToPc>>>,
@@ -115,6 +126,14 @@ async fn reader_task<R: AsyncReadExt + Unpin>(
                     }
                     Ok(n) => {
                         accum.extend_from_slice(&raw_buf[..n]);
+
+                        // Guard against unbounded accumulation (e.g. noise without delimiters).
+                        if accum.len() > MAX_ACCUM_SIZE {
+                            warn!("Accumulation buffer exceeded {} bytes, resetting", MAX_ACCUM_SIZE);
+                            accum.clear();
+                            continue;
+                        }
+
                         // COBS frames are delimited by 0x00
                         while let Some(zero_pos) = accum.iter().position(|&b| b == 0) {
                             let frame = &accum[..zero_pos + 1];
@@ -130,7 +149,7 @@ async fn reader_task<R: AsyncReadExt + Unpin>(
                                     }
                                 }
                             }
-                            accum = accum[zero_pos + 1..].to_vec();
+                            accum.drain(..=zero_pos);
                         }
                     }
                     Err(e) => {
@@ -260,6 +279,31 @@ mod tests {
         drop(writer);
 
         let decoded = resp_rx.recv().await.expect("should reassemble fragmented frame");
+        assert_eq!(decoded, msg);
+    }
+
+    #[tokio::test]
+    async fn reader_resets_on_oversized_accumulation() {
+        // Write >MAX_ACCUM_SIZE bytes without a COBS delimiter, then a valid frame.
+        let (resp_tx, mut resp_rx) = mpsc::channel::<RxToPc>(16);
+        let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+
+        let (mut writer, reader) = tokio::io::duplex(4096);
+
+        tokio::spawn(reader_task(reader, resp_tx, cancel_rx));
+
+        // Write garbage that exceeds MAX_ACCUM_SIZE (no zero delimiter).
+        let garbage = vec![0xAA; super::MAX_ACCUM_SIZE + 100];
+        writer.write_all(&garbage).await.unwrap();
+        tokio::task::yield_now().await;
+
+        // Now write a valid frame — reader should have reset and decode this.
+        let msg = RxToPc::SweepComplete;
+        let frame = encode_cobs_frame(&msg);
+        writer.write_all(&frame).await.unwrap();
+        drop(writer);
+
+        let decoded = resp_rx.recv().await.expect("should decode frame after reset");
         assert_eq!(decoded, msg);
     }
 

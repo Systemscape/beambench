@@ -8,7 +8,11 @@ use beambench_protocol::{PcToRx, RxToPc};
 use tokio::sync::{Mutex, mpsc};
 use tracing::{error, info, warn};
 
-/// Default timeout for waiting on a response from the RX board.
+/// Timeout for waiting on a single response from the RX board during a sweep.
+///
+/// This covers the turntable move time plus RSSI sample collection. 30 s is
+/// generous — a 360° move at typical speed takes ~15 s, and RSSI collection
+/// adds a few seconds at most.
 const SWEEP_RECV_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Run a sweep to completion, sending events to the WebSocket channel.
@@ -85,6 +89,9 @@ pub async fn run_sweep(
                         message: msg.clone(),
                     });
                     return Err(msg);
+                }
+                RxToPc::HomeComplete => {
+                    // HomeComplete shouldn't arrive during a sweep, but be exhaustive.
                 }
                 RxToPc::Status { .. } => {
                     // Ignore status updates during sweep.

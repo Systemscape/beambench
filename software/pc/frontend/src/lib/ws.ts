@@ -45,6 +45,7 @@ export type WsEvent =
           sample_count: number;
       }
     | { type: 'SweepComplete' }
+    | { type: 'HomeComplete' }
     | {
           type: 'Status';
           sweeping: boolean;

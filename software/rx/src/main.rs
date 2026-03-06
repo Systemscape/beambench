@@ -213,6 +213,7 @@ async fn main(spawner: Spawner) -> ! {
             sweep_cmd_ch.sender(),
             stop_signal,
             sender,
+            turntable_resp_signal,
         ))
         .ok();
     spawner
@@ -532,6 +533,7 @@ async fn serial_rx_task(
     sweep_cmd_tx: embassy_sync::channel::Sender<'static, NoopRawMutex, SweepCmd, 1>,
     stop_signal: &'static Signal<NoopRawMutex, ()>,
     sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
+    turntable_resp_signal: &'static Signal<NoopRawMutex, proto::TurntableResponse>,
 ) {
     let mut raw_buf = [0u8; 64];
     let mut accum: heapless::Vec<u8, COBS_BUF_SIZE> = heapless::Vec::new();
@@ -565,6 +567,7 @@ async fn serial_rx_task(
                                 &sweep_cmd_tx,
                                 stop_signal,
                                 sender,
+                                turntable_resp_signal,
                             )
                             .await;
                         }
@@ -591,6 +594,7 @@ async fn handle_serial_cmd(
     sweep_cmd_tx: &embassy_sync::channel::Sender<'static, NoopRawMutex, SweepCmd, 1>,
     stop_signal: &'static Signal<NoopRawMutex, ()>,
     sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
+    turntable_resp_signal: &'static Signal<NoopRawMutex, proto::TurntableResponse>,
 ) {
     match cmd {
         PcToRx::QueryStatus => {
@@ -642,12 +646,41 @@ async fn handle_serial_cmd(
         }
         PcToRx::ReturnHome => {
             info!("ReturnHome: moving to 0°");
+            // Check turntable is paired.
+            if !state.lock().await.turntable_paired {
+                let mut desc = heapless::String::new();
+                let _ = desc.push_str("Turntable not connected");
+                resp_tx.send(RxToPc::Error { description: desc }).await;
+                return;
+            }
+            // Drain stale turntable signals so we don't pick up old MoveComplete.
+            turntable_resp_signal.reset();
             send_turntable_cmd(
                 sender,
                 state,
                 proto::TurntableCommand::MoveTo { angle_deg: 0.0 },
             )
             .await;
+            // Wait for turntable response with 30 s timeout.
+            match with_timeout(Duration::from_secs(30), turntable_resp_signal.wait()).await {
+                Ok(proto::TurntableResponse::MoveComplete { .. }) => {
+                    info!("ReturnHome: turntable reached 0°");
+                    resp_tx.send(RxToPc::HomeComplete).await;
+                }
+                Ok(proto::TurntableResponse::Error { description }) => {
+                    info!("ReturnHome error: {}", description.as_str());
+                    let mut desc = heapless::String::<128>::new();
+                    let _ = desc.push_str("Homing error: ");
+                    let _ = desc.push_str(description.as_str());
+                    resp_tx.send(RxToPc::Error { description: desc }).await;
+                }
+                Err(_) => {
+                    info!("ReturnHome timed out");
+                    let mut desc = heapless::String::new();
+                    let _ = desc.push_str("ReturnHome timeout (30s)");
+                    resp_tx.send(RxToPc::Error { description: desc }).await;
+                }
+            }
         }
         PcToRx::ConfigureTx {
             channel,

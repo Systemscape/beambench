@@ -19,6 +19,19 @@ use tracing::info;
 
 use beambench_pc::{PortInfo, SystemStatus, WsCommand, WsEvent, export_csv};
 
+/// Initial delay before sending QueryStatus to a freshly-opened device.
+/// Gives the USB-serial interface time to stabilize.
+const VERIFY_INITIAL_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Timeout for the device verification probe. The RX board responds in <100 ms;
+/// 1 s is generous enough for slow USB bridges while still detecting wrong
+/// devices quickly.
+const VERIFY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Timeout for the ReturnHome completion response from the RX board.
+/// Matches the sweep turntable move timeout (30 s).
+const HOME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 #[derive(Parser)]
 struct Args {
     /// Run in development mode (expect Vite dev server for frontend).
@@ -34,11 +47,53 @@ struct Args {
 #[folder = "frontend/build/"]
 struct FrontendAssets;
 
+/// Shared application state, accessible from all handlers and spawned tasks.
 struct AppState {
+    /// Broadcast channel for pushing events to all connected WebSocket clients.
     ws_tx: broadcast::Sender<WsEvent>,
+    /// Active serial/TCP connection to the RX board (if any).
     serial: Mutex<Option<beambench_pc::serial::SerialHandle>>,
+    /// Measurement data from the most recent (or in-progress) sweep.
     data: Mutex<Vec<beambench_pc::DataPoint>>,
     sweeping: AtomicBool,
+    /// Whether a ReturnHome operation is in progress. Prevents concurrent
+    /// homing and blocks sweep starts while the turntable is returning.
+    homing: AtomicBool,
+    tx_connected: AtomicBool,
+    turntable_connected: AtomicBool,
+}
+
+impl AppState {
+    /// Build a `SystemStatus` snapshot from the current atomic state.
+    ///
+    /// When the serial link is down, peer status atomics may be stale — this
+    /// method clamps them to `false` so the UI never shows ghost connections.
+    async fn status(&self) -> SystemStatus {
+        let serial_connected = self.serial.lock().await.is_some();
+        SystemStatus {
+            sweeping: self.sweeping.load(Ordering::SeqCst),
+            tx_connected: serial_connected && self.tx_connected.load(Ordering::SeqCst),
+            turntable_connected: serial_connected
+                && self.turntable_connected.load(Ordering::SeqCst),
+            serial_connected,
+            data_points: self.data.lock().await.len(),
+        }
+    }
+
+    /// Send a `Status` event to all WebSocket clients.
+    async fn broadcast_status(&self) {
+        let _ = self.ws_tx.send(WsEvent::Status(self.status().await));
+    }
+
+    /// Log a message and broadcast an error event to all WebSocket clients.
+    fn broadcast_error(&self, log_msg: &str, error_msg: &str) {
+        let _ = self.ws_tx.send(WsEvent::Log {
+            message: log_msg.to_string(),
+        });
+        let _ = self.ws_tx.send(WsEvent::Error {
+            message: error_msg.to_string(),
+        });
+    }
 }
 
 #[tokio::main]
@@ -59,6 +114,9 @@ async fn main() {
         serial: Mutex::new(None),
         data: Mutex::new(Vec::new()),
         sweeping: AtomicBool::new(false),
+        homing: AtomicBool::new(false),
+        tx_connected: AtomicBool::new(false),
+        turntable_connected: AtomicBool::new(false),
     });
 
     let api = Router::new()
@@ -112,22 +170,14 @@ async fn ws_handler(
     ws.on_upgrade(|socket| handle_ws(socket, state))
 }
 
+/// Main WebSocket connection handler. Bridges broadcast events to the client
+/// and dispatches incoming commands to [`handle_command`].
 async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
     info!("WebSocket client connected");
     let mut rx = state.ws_tx.subscribe();
 
     // Send current status on connect.
-    let status = {
-        let serial = state.serial.lock().await;
-        let data = state.data.lock().await;
-        SystemStatus {
-            sweeping: state.sweeping.load(Ordering::SeqCst),
-            tx_connected: false,
-            turntable_connected: false,
-            serial_connected: serial.is_some(),
-            data_points: data.len(),
-        }
-    };
+    let status = state.status().await;
     let _ = socket
         .send(Message::Text(serde_json::to_string(&WsEvent::Status(status)).unwrap().into()))
         .await;
@@ -178,6 +228,7 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
     }
 }
 
+/// Dispatch a single [`WsCommand`] received from a WebSocket client.
 async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
     match cmd {
         WsCommand::ListPorts => {
@@ -208,24 +259,19 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
                     let _ = state.ws_tx.send(WsEvent::Log {
                         message: format!("Connected to {}, verifying device...", port),
                     });
-                    let _ = state.ws_tx.send(WsEvent::Status(SystemStatus {
-                        sweeping: false,
-                        tx_connected: false,
-                        turntable_connected: false,
-                        serial_connected: true,
-                        data_points: state.data.lock().await.len(),
-                    }));
+                    state.tx_connected.store(false, Ordering::SeqCst);
+                    state.turntable_connected.store(false, Ordering::SeqCst);
+                    state.broadcast_status().await;
 
                     // Probe the device: send QueryStatus and wait for a response.
-                    let ws_tx = state.ws_tx.clone();
+                    let state = state.clone();
                     let port_name = port.clone();
                     tokio::spawn(async move {
-                        // Give the device a moment to be ready.
-                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        tokio::time::sleep(VERIFY_INITIAL_DELAY).await;
                         let _ = serial_tx.send(beambench_protocol::PcToRx::QueryStatus).await;
 
                         let result = tokio::time::timeout(
-                            std::time::Duration::from_secs(2),
+                            VERIFY_TIMEOUT,
                             async {
                                 let mut rx = serial_rx.lock().await;
                                 rx.recv().await
@@ -236,74 +282,70 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
                         match result {
                             Ok(Some(beambench_protocol::RxToPc::Status { tx_connected, turntable_connected, .. })) => {
                                 tracing::info!("Device verified as RX board");
-                                let _ = ws_tx.send(WsEvent::Log {
+                                let _ = state.ws_tx.send(WsEvent::Log {
                                     message: format!("{} confirmed as RX board (TX: {}, Turntable: {})",
                                         port_name,
                                         if tx_connected { "connected" } else { "not found" },
                                         if turntable_connected { "connected" } else { "not found" }),
                                 });
-                                let _ = ws_tx.send(WsEvent::Status(SystemStatus {
-                                    sweeping: false,
-                                    tx_connected,
-                                    turntable_connected,
-                                    serial_connected: true,
-                                    data_points: 0,
-                                }));
+                                state.tx_connected.store(tx_connected, Ordering::SeqCst);
+                                state.turntable_connected.store(turntable_connected, Ordering::SeqCst);
+                                state.broadcast_status().await;
                             }
                             Ok(Some(other)) => {
                                 tracing::info!("Unexpected response from device: {:?}", other);
-                                let _ = ws_tx.send(WsEvent::Log {
+                                let _ = state.ws_tx.send(WsEvent::Log {
                                     message: format!("{}: got unexpected response — may not be RX board", port_name),
                                 });
                             }
                             Ok(None) => {
                                 tracing::warn!("Serial channel closed during verification");
-                                let _ = ws_tx.send(WsEvent::Log {
+                                let _ = state.ws_tx.send(WsEvent::Log {
                                     message: format!("{}: connection lost during verification", port_name),
                                 });
                             }
                             Err(_) => {
                                 tracing::warn!("No response from {} — not an RX board or firmware not running", port_name);
-                                let _ = ws_tx.send(WsEvent::Log {
-                                    message: format!("{}: no response — this is probably not the RX board", port_name),
-                                });
-                                let _ = ws_tx.send(WsEvent::Error {
-                                    message: "Device did not respond. Is this the RX board?".to_string(),
-                                });
+                                state.broadcast_error(
+                                    &format!("{}: no response — this is probably not the RX board", port_name),
+                                    "Device did not respond. Is this the RX board?",
+                                );
                             }
                         }
                     });
                 }
                 Err(e) => {
                     info!("Failed to connect to {}: {}", port, e);
-                    let _ = state.ws_tx.send(WsEvent::Log {
-                        message: format!("Failed to connect to {}: {}", port, e),
-                    });
-                    let _ = state.ws_tx.send(WsEvent::Error {
-                        message: format!("Failed to open {}: {}", port, e),
-                    });
+                    state.broadcast_error(
+                        &format!("Failed to connect to {}: {}", port, e),
+                        &format!("Failed to open {}: {}", port, e),
+                    );
                 }
             }
         }
         WsCommand::Disconnect => {
-            let mut serial = state.serial.lock().await;
-            if let Some(handle) = serial.take() {
-                info!("Disconnecting serial");
-                handle.close();
+            {
+                let mut serial = state.serial.lock().await;
+                if let Some(handle) = serial.take() {
+                    info!("Disconnecting serial");
+                    handle.close();
+                }
             }
             let _ = state.ws_tx.send(WsEvent::Log {
                 message: "Disconnected".to_string(),
             });
-            let _ = state.ws_tx.send(WsEvent::Status(SystemStatus {
-                sweeping: false,
-                tx_connected: false,
-                turntable_connected: false,
-                serial_connected: false,
-                data_points: state.data.lock().await.len(),
-            }));
+            state.tx_connected.store(false, Ordering::SeqCst);
+            state.turntable_connected.store(false, Ordering::SeqCst);
+            state.broadcast_status().await;
         }
         WsCommand::StartSweep(config) => {
-            // Prevent concurrent sweeps.
+            // Prevent concurrent sweeps and sweep-during-homing.
+            if state.homing.load(Ordering::SeqCst) {
+                let _ = state.ws_tx.send(WsEvent::Error {
+                    message: "Cannot start sweep while homing".to_string(),
+                });
+                return;
+            }
             if state.sweeping.swap(true, Ordering::SeqCst) {
                 let _ = state.ws_tx.send(WsEvent::Error {
                     message: "Sweep already in progress".to_string(),
@@ -314,48 +356,48 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
             // Clear previous data.
             state.data.lock().await.clear();
 
-            let serial = state.serial.lock().await;
-            if let Some(ref handle) = *serial {
-                let serial_tx = handle.tx.clone();
-                let serial_rx = handle.rx.clone();
-                let ws_tx = state.ws_tx.clone();
+            let cloned = {
+                let serial = state.serial.lock().await;
+                serial.as_ref().map(|h| (h.tx.clone(), h.rx.clone()))
+            };
+            if let Some((serial_tx, serial_rx)) = cloned {
                 let state = state.clone();
 
-                let _ = ws_tx.send(WsEvent::Log {
+                let _ = state.ws_tx.send(WsEvent::Log {
                     message: format!(
                         "Sweep started: {}° to {}° (step {}°, {} samples)",
                         config.start_deg, config.stop_deg, config.step_deg, config.samples_per_angle
                     ),
                 });
+                let _ = state.ws_tx.send(WsEvent::Status(state.status().await));
 
                 tokio::spawn(async move {
                     let result =
-                        beambench_pc::sweep::run_sweep(config, &serial_tx, &serial_rx, &ws_tx)
+                        beambench_pc::sweep::run_sweep(config, &serial_tx, &serial_rx, &state.ws_tx)
                             .await;
                     match &result {
                         Ok(data) => {
-                            let _ = ws_tx.send(WsEvent::Log {
+                            let _ = state.ws_tx.send(WsEvent::Log {
                                 message: format!("Sweep complete: {} data points", data.len()),
                             });
                             let mut store = state.data.lock().await;
                             *store = data.clone();
                         }
                         Err(e) => {
-                            let _ = ws_tx.send(WsEvent::Log {
+                            let _ = state.ws_tx.send(WsEvent::Log {
                                 message: format!("Sweep failed: {}", e),
                             });
                         }
                     }
                     state.sweeping.store(false, Ordering::SeqCst);
+                    state.broadcast_status().await;
                 });
             } else {
                 state.sweeping.store(false, Ordering::SeqCst);
-                let _ = state.ws_tx.send(WsEvent::Log {
-                    message: "Sweep failed: not connected".to_string(),
-                });
-                let _ = state.ws_tx.send(WsEvent::Error {
-                    message: "Not connected to serial/TCP".to_string(),
-                });
+                state.broadcast_error(
+                    "Sweep failed: not connected",
+                    "Not connected to serial/TCP",
+                );
             }
         }
         WsCommand::Stop => {
@@ -387,12 +429,81 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
             // CSV export is available via REST endpoint.
         }
         WsCommand::ReturnHome => {
-            let serial = state.serial.lock().await;
-            if let Some(ref handle) = *serial {
-                let _ = handle.tx.send(beambench_protocol::PcToRx::ReturnHome).await;
+            if state.sweeping.load(Ordering::SeqCst) {
+                let _ = state.ws_tx.send(WsEvent::Error {
+                    message: "Cannot return home while sweep is in progress".to_string(),
+                });
+                return;
+            }
+            if state.homing.swap(true, Ordering::SeqCst) {
+                let _ = state.ws_tx.send(WsEvent::Error {
+                    message: "Already returning home".to_string(),
+                });
+                return;
+            }
+
+            let cloned = {
+                let serial = state.serial.lock().await;
+                serial.as_ref().map(|h| (h.tx.clone(), h.rx.clone()))
+            };
+            if let Some((serial_tx, serial_rx)) = cloned {
                 let _ = state.ws_tx.send(WsEvent::Log {
                     message: "Returning to home position...".to_string(),
                 });
+                state.broadcast_status().await;
+
+                let state = state.clone();
+                tokio::spawn(async move {
+                    let _ = serial_tx.send(beambench_protocol::PcToRx::ReturnHome).await;
+
+                    let result = tokio::time::timeout(HOME_TIMEOUT, async {
+                        let mut rx = serial_rx.lock().await;
+                        loop {
+                            match rx.recv().await {
+                                Some(beambench_protocol::RxToPc::HomeComplete) => return Ok(()),
+                                Some(beambench_protocol::RxToPc::Error { description }) => {
+                                    return Err(description.to_string());
+                                }
+                                Some(_) => continue, // Skip Status, DataPoint, etc.
+                                None => return Err("Serial connection lost".to_string()),
+                            }
+                        }
+                    })
+                    .await;
+
+                    match result {
+                        Ok(Ok(())) => {
+                            tracing::info!("Turntable reached home");
+                            let _ = state.ws_tx.send(WsEvent::HomeComplete);
+                            let _ = state.ws_tx.send(WsEvent::Log {
+                                message: "Turntable reached home position".to_string(),
+                            });
+                        }
+                        Ok(Err(e)) => {
+                            tracing::warn!("ReturnHome error: {}", e);
+                            state.broadcast_error(
+                                &format!("ReturnHome failed: {}", e),
+                                &e,
+                            );
+                        }
+                        Err(_) => {
+                            tracing::warn!("ReturnHome timed out");
+                            state.broadcast_error(
+                                "ReturnHome timed out (30s)",
+                                "ReturnHome timed out — turntable may be stuck",
+                            );
+                        }
+                    }
+
+                    state.homing.store(false, Ordering::SeqCst);
+                    state.broadcast_status().await;
+                });
+            } else {
+                state.homing.store(false, Ordering::SeqCst);
+                state.broadcast_error(
+                    "ReturnHome failed: not connected",
+                    "Not connected to serial/TCP",
+                );
             }
         }
     }

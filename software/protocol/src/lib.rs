@@ -167,6 +167,8 @@ pub enum RxToPc {
     },
     /// Sweep finished successfully.
     SweepComplete,
+    /// Turntable reached home (0°) after a `PcToRx::ReturnHome` command.
+    HomeComplete,
     /// Error during operation.
     Error { description: String<128> },
     /// Status report.
@@ -286,6 +288,8 @@ mod test {
 
         test_ser_deser(&RxToPc::SweepComplete, &mut buf);
 
+        test_ser_deser(&RxToPc::HomeComplete, &mut buf);
+
         // PcToRx variants
         test_ser_deser(
             &PcToRx::StartSweep {
@@ -358,6 +362,7 @@ mod test {
             &mut buf,
         );
         test_cobs_round_trip(&RxToPc::SweepComplete, &mut buf);
+        test_cobs_round_trip(&RxToPc::HomeComplete, &mut buf);
         test_cobs_round_trip(
             &RxToPc::Error {
                 description: String::try_from("test error").unwrap(),
