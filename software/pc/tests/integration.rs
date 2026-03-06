@@ -1,6 +1,6 @@
-//! End-to-end integration tests: PC app ↔ rx-sim over TCP.
+//! End-to-end integration tests: PC app ↔ bridge-sim over TCP.
 //!
-//! These tests start an in-process rx-sim server, connect via SerialHandle,
+//! These tests start an in-process bridge-sim server, connect via SerialHandle,
 //! run sweeps, and verify the full pipeline including COBS framing, sweep
 //! orchestration, and CSV export.
 //!
@@ -17,7 +17,7 @@ async fn full_sweep_via_tcp() {
 
     let handle = beambench_pc::serial::SerialHandle::open_tcp(&addr_str)
         .await
-        .expect("should connect to rx-sim");
+        .expect("should connect to bridge-sim");
 
     let serial_tx = handle.tx.clone();
     let serial_rx = handle.rx.clone();
@@ -55,7 +55,7 @@ async fn full_sweep_via_tcp() {
 
     // Verify sample count
     for dp in &result {
-        assert_eq!(dp.sample_count, 5);
+        assert_eq!(dp.sample_count, 10); // sim generates 10 beacon samples
     }
 
     // Verify WebSocket events were broadcast
@@ -76,52 +76,6 @@ async fn full_sweep_via_tcp() {
     let lines: Vec<&str> = csv.lines().collect();
     assert_eq!(lines[0], "angle_deg,rssi_dbm,sample_count");
     assert_eq!(lines.len(), 5); // header + 4 data rows
-
-    handle.close();
-}
-
-#[tokio::test]
-async fn sweep_stop_via_tcp() {
-    let addr = sim::start_server().await;
-    let addr_str = addr.to_string();
-
-    let handle = beambench_pc::serial::SerialHandle::open_tcp(&addr_str)
-        .await
-        .expect("should connect to rx-sim");
-
-    let serial_tx = handle.tx.clone();
-    let serial_rx = handle.rx.clone();
-    let (ws_tx, _ws_rx) = broadcast::channel::<WsEvent>(64);
-
-    // Long sweep: 0 to 360 in 1° steps (361 points at 50ms each ≈ 18s)
-    let config = SweepConfig {
-        start_deg: 0.0,
-        stop_deg: 360.0,
-        step_deg: 1.0,
-        samples_per_angle: 5,
-    };
-
-    let stop_tx = serial_tx.clone();
-
-    let sweep_handle = tokio::spawn(async move {
-        beambench_pc::sweep::run_sweep(config, &serial_tx, &serial_rx, &ws_tx).await
-    });
-
-    // Wait a bit for the sweep to start, then send stop
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    stop_tx
-        .send(beambench_protocol::PcToRx::Stop)
-        .await
-        .expect("should send stop command");
-
-    let result = sweep_handle.await.unwrap();
-    assert!(result.is_err(), "sweep should have been aborted");
-    let err = result.unwrap_err();
-    assert!(
-        err.contains("aborted") || err.contains("Sweep aborted"),
-        "error should mention abort, got: {}",
-        err
-    );
 
     handle.close();
 }

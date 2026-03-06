@@ -9,6 +9,10 @@
 
 #![no_std]
 
+pub mod bridge_logic;
+pub mod rx_logic;
+pub mod tx_logic;
+
 use heapless::String;
 use serde::{Deserialize, Serialize};
 
@@ -155,7 +159,62 @@ pub enum EspnowMessage {
     MeasurementResult { rssi_dbm: f32, sample_count: u16 },
 }
 
-// ── Serial protocol messages (PC ↔ RX) ──────────────────────────────────────
+// ── Serial protocol v2 (PC ↔ Bridge) ────────────────────────────────────────
+
+/// Command from PC to Bridge (over USB-serial, COBS-framed postcard).
+///
+/// The Bridge translates these into ESP-NOW messages and routes them
+/// to the appropriate field device by role.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum PcCommand {
+    // TX control
+    ConfigureTx {
+        channel: u8,
+        tx_power_dbm: i8,
+        packet_rate_hz: u16,
+    },
+    StartTransmitting,
+    StopTransmitting,
+
+    // Stepper control
+    MoveTo { angle_deg: f32 },
+    StopStepper,
+    ReturnHome,
+
+    // RX control
+    StartMeasurement,
+    ReportMeasurement,
+
+    // System
+    QueryStatus,
+}
+
+/// Event from Bridge to PC (over USB-serial, COBS-framed postcard).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum DeviceEvent {
+    // TX responses
+    TxAck,
+
+    // Stepper responses
+    MoveComplete { angle_deg: f32 },
+    StepperError { description: String<64> },
+    HomeComplete,
+
+    // RX responses
+    Measurement { rssi_dbm: f32, sample_count: u16 },
+
+    // System
+    Status {
+        tx_connected: bool,
+        rx_connected: bool,
+        stepper_connected: bool,
+    },
+    Error { description: String<128> },
+}
+
+// ── Serial protocol v1 (PC ↔ RX, legacy) ───────────────────────────────────
 
 /// Command from PC to RX board (over USB-serial).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -266,8 +325,8 @@ mod test {
     use serde::{Deserialize, Serialize};
 
     use crate::{
-        EspnowMessage, HelloBeacon, PairConfirm, PcToRx, Role, RxToPc, TurntableCommand,
-        TurntableResponse, TxCommand, TxResponse, MAX_MSG_SIZE,
+        DeviceEvent, EspnowMessage, HelloBeacon, PairConfirm, PcCommand, PcToRx, Role, RxToPc,
+        TurntableCommand, TurntableResponse, TxCommand, TxResponse, MAX_MSG_SIZE,
     };
 
     /// Serialize `msg` into `buf` with postcard, then deserialize and assert equality.
@@ -494,6 +553,523 @@ mod test {
             }),
             &mut buf,
         );
+    }
+
+    #[test]
+    fn v2_pc_command_round_trip() {
+        let mut buf = [0u8; MAX_MSG_SIZE];
+
+        test_cobs_round_trip(
+            &PcCommand::ConfigureTx {
+                channel: 6,
+                tx_power_dbm: 20,
+                packet_rate_hz: 100,
+            },
+            &mut buf,
+        );
+        test_cobs_round_trip(&PcCommand::StartTransmitting, &mut buf);
+        test_cobs_round_trip(&PcCommand::StopTransmitting, &mut buf);
+        test_cobs_round_trip(&PcCommand::MoveTo { angle_deg: 45.0 }, &mut buf);
+        test_cobs_round_trip(&PcCommand::StopStepper, &mut buf);
+        test_cobs_round_trip(&PcCommand::ReturnHome, &mut buf);
+        test_cobs_round_trip(&PcCommand::StartMeasurement, &mut buf);
+        test_cobs_round_trip(&PcCommand::ReportMeasurement, &mut buf);
+        test_cobs_round_trip(&PcCommand::QueryStatus, &mut buf);
+    }
+
+    #[test]
+    fn v2_device_event_round_trip() {
+        let mut buf = [0u8; MAX_MSG_SIZE];
+
+        test_cobs_round_trip(&DeviceEvent::TxAck, &mut buf);
+        test_cobs_round_trip(
+            &DeviceEvent::MoveComplete { angle_deg: 90.0 },
+            &mut buf,
+        );
+        test_cobs_round_trip(
+            &DeviceEvent::StepperError {
+                description: String::try_from("stall").unwrap(),
+            },
+            &mut buf,
+        );
+        test_cobs_round_trip(&DeviceEvent::HomeComplete, &mut buf);
+        test_cobs_round_trip(
+            &DeviceEvent::Measurement {
+                rssi_dbm: -42.5,
+                sample_count: 100,
+            },
+            &mut buf,
+        );
+        test_cobs_round_trip(
+            &DeviceEvent::Status {
+                tx_connected: true,
+                rx_connected: true,
+                stepper_connected: false,
+            },
+            &mut buf,
+        );
+        test_cobs_round_trip(
+            &DeviceEvent::Error {
+                description: String::try_from("timeout").unwrap(),
+            },
+            &mut buf,
+        );
+    }
+
+    #[test]
+    fn v2_espnow_measurement_round_trip() {
+        let mut buf = [0u8; MAX_MSG_SIZE];
+
+        test_ser_deser(&EspnowMessage::MeasurementBeacon, &mut buf);
+        test_ser_deser(&EspnowMessage::StartMeasurement, &mut buf);
+        test_ser_deser(&EspnowMessage::ReportMeasurement, &mut buf);
+        test_ser_deser(
+            &EspnowMessage::MeasurementResult {
+                rssi_dbm: -55.0,
+                sample_count: 42,
+            },
+            &mut buf,
+        );
+    }
+
+    // ── Bridge routing tests ──────────────────────────────────────────────
+
+    mod bridge_routing_tests {
+        use crate::bridge_logic::{route_command, translate_response, RouteAction};
+        use crate::*;
+
+        #[test]
+        fn start_transmitting_routes_to_tx() {
+            let action = route_command(&PcCommand::StartTransmitting);
+            assert_eq!(
+                action,
+                RouteAction::SendTo {
+                    role: Role::Tx,
+                    msg: EspnowMessage::TxCmd(TxCommand::StartTransmit),
+                }
+            );
+        }
+
+        #[test]
+        fn stop_transmitting_routes_to_tx() {
+            let action = route_command(&PcCommand::StopTransmitting);
+            assert_eq!(
+                action,
+                RouteAction::SendTo {
+                    role: Role::Tx,
+                    msg: EspnowMessage::TxCmd(TxCommand::StopTransmit),
+                }
+            );
+        }
+
+        #[test]
+        fn configure_tx_routes_to_tx() {
+            let action = route_command(&PcCommand::ConfigureTx {
+                channel: 6,
+                tx_power_dbm: 20,
+                packet_rate_hz: 100,
+            });
+            assert_eq!(
+                action,
+                RouteAction::SendTo {
+                    role: Role::Tx,
+                    msg: EspnowMessage::TxCmd(TxCommand::Configure {
+                        channel: 6,
+                        tx_power_dbm: 20,
+                        packet_rate_hz: 100,
+                    }),
+                }
+            );
+        }
+
+        #[test]
+        fn move_to_routes_to_turntable() {
+            let action = route_command(&PcCommand::MoveTo { angle_deg: 90.0 });
+            assert_eq!(
+                action,
+                RouteAction::SendTo {
+                    role: Role::Turntable,
+                    msg: EspnowMessage::TurntableCmd(TurntableCommand::MoveTo { angle_deg: 90.0 }),
+                }
+            );
+        }
+
+        #[test]
+        fn stop_stepper_routes_to_turntable() {
+            let action = route_command(&PcCommand::StopStepper);
+            assert_eq!(
+                action,
+                RouteAction::SendTo {
+                    role: Role::Turntable,
+                    msg: EspnowMessage::TurntableCmd(TurntableCommand::Stop),
+                }
+            );
+        }
+
+        #[test]
+        fn return_home_routes_to_turntable_zero() {
+            let action = route_command(&PcCommand::ReturnHome);
+            assert_eq!(
+                action,
+                RouteAction::SendTo {
+                    role: Role::Turntable,
+                    msg: EspnowMessage::TurntableCmd(TurntableCommand::MoveTo { angle_deg: 0.0 }),
+                }
+            );
+        }
+
+        #[test]
+        fn start_measurement_routes_to_rx() {
+            let action = route_command(&PcCommand::StartMeasurement);
+            assert_eq!(
+                action,
+                RouteAction::SendTo {
+                    role: Role::Rx,
+                    msg: EspnowMessage::StartMeasurement,
+                }
+            );
+        }
+
+        #[test]
+        fn report_measurement_routes_to_rx() {
+            let action = route_command(&PcCommand::ReportMeasurement);
+            assert_eq!(
+                action,
+                RouteAction::SendTo {
+                    role: Role::Rx,
+                    msg: EspnowMessage::ReportMeasurement,
+                }
+            );
+        }
+
+        #[test]
+        fn query_status_is_local() {
+            assert_eq!(route_command(&PcCommand::QueryStatus), RouteAction::Local);
+        }
+
+        #[test]
+        fn translate_turntable_move_complete() {
+            let msg =
+                EspnowMessage::TurntableResp(TurntableResponse::MoveComplete { angle_deg: 45.0 });
+            assert_eq!(
+                translate_response(&msg),
+                Some(DeviceEvent::MoveComplete { angle_deg: 45.0 })
+            );
+        }
+
+        #[test]
+        fn translate_turntable_error() {
+            let msg = EspnowMessage::TurntableResp(TurntableResponse::Error {
+                description: String::try_from("stall").unwrap(),
+            });
+            assert_eq!(
+                translate_response(&msg),
+                Some(DeviceEvent::StepperError {
+                    description: String::try_from("stall").unwrap(),
+                })
+            );
+        }
+
+        #[test]
+        fn translate_tx_ack() {
+            let msg = EspnowMessage::TxResp(TxResponse::Ack);
+            assert_eq!(translate_response(&msg), Some(DeviceEvent::TxAck));
+        }
+
+        #[test]
+        fn translate_measurement_result() {
+            let msg = EspnowMessage::MeasurementResult {
+                rssi_dbm: -42.5,
+                sample_count: 10,
+            };
+            assert_eq!(
+                translate_response(&msg),
+                Some(DeviceEvent::Measurement {
+                    rssi_dbm: -42.5,
+                    sample_count: 10,
+                })
+            );
+        }
+
+        #[test]
+        fn translate_ignores_non_responses() {
+            assert_eq!(translate_response(&EspnowMessage::MeasurementBeacon), None);
+            assert_eq!(translate_response(&EspnowMessage::StartMeasurement), None);
+            assert_eq!(
+                translate_response(&EspnowMessage::Hello(HelloBeacon {
+                    role: Role::Tx,
+                    mac: [0; 6],
+                })),
+                None
+            );
+        }
+    }
+
+    // ── RX measurement logic tests ───────────────────────────────────────
+
+    mod rx_logic_tests {
+        use crate::rx_logic::MeasurementState;
+        use crate::EspnowMessage;
+
+        #[test]
+        fn initially_not_measuring() {
+            let state = MeasurementState::new();
+            assert!(!state.is_measuring());
+            assert_eq!(state.sample_count(), 0);
+        }
+
+        #[test]
+        fn ignores_rssi_when_not_measuring() {
+            let mut state = MeasurementState::new();
+            state.accumulate_rssi(-40);
+            state.accumulate_rssi(-50);
+            assert_eq!(state.sample_count(), 0);
+        }
+
+        #[test]
+        fn start_then_accumulate_then_report() {
+            let mut state = MeasurementState::new();
+            state.start_measurement();
+            assert!(state.is_measuring());
+
+            state.accumulate_rssi(-40);
+            state.accumulate_rssi(-50);
+            state.accumulate_rssi(-60);
+            assert_eq!(state.sample_count(), 3);
+
+            let (rssi, count) = state.report_measurement();
+            assert_eq!(count, 3);
+            assert!((rssi - (-50.0)).abs() < 0.01); // average of -40, -50, -60
+            assert!(!state.is_measuring());
+            assert_eq!(state.sample_count(), 0);
+        }
+
+        #[test]
+        fn report_with_no_samples() {
+            let mut state = MeasurementState::new();
+            state.start_measurement();
+            let (rssi, count) = state.report_measurement();
+            assert_eq!(count, 0);
+            assert_eq!(rssi, 0.0);
+        }
+
+        #[test]
+        fn start_resets_previous_data() {
+            let mut state = MeasurementState::new();
+            state.start_measurement();
+            state.accumulate_rssi(-30);
+            state.accumulate_rssi(-30);
+            // Start again without reporting — should reset.
+            state.start_measurement();
+            state.accumulate_rssi(-70);
+            let (rssi, count) = state.report_measurement();
+            assert_eq!(count, 1);
+            assert!((rssi - (-70.0)).abs() < 0.01);
+        }
+
+        #[test]
+        fn handle_message_measurement_cycle() {
+            let mut state = MeasurementState::new();
+
+            // StartMeasurement via handle_message.
+            let resp = state.handle_message(&EspnowMessage::StartMeasurement, 0);
+            assert!(resp.is_none());
+            assert!(state.is_measuring());
+
+            // Feed beacons.
+            let resp = state.handle_message(&EspnowMessage::MeasurementBeacon, -45);
+            assert!(resp.is_none());
+            let resp = state.handle_message(&EspnowMessage::MeasurementBeacon, -55);
+            assert!(resp.is_none());
+
+            // ReportMeasurement.
+            let resp = state.handle_message(&EspnowMessage::ReportMeasurement, 0);
+            assert_eq!(
+                resp,
+                Some(EspnowMessage::MeasurementResult {
+                    rssi_dbm: -50.0,
+                    sample_count: 2,
+                })
+            );
+            assert!(!state.is_measuring());
+        }
+
+        #[test]
+        fn handle_message_ignores_unrelated() {
+            let mut state = MeasurementState::new();
+            let resp = state.handle_message(
+                &EspnowMessage::TxCmd(crate::TxCommand::StartTransmit),
+                0,
+            );
+            assert!(resp.is_none());
+            assert!(!state.is_measuring());
+        }
+    }
+
+    // ── TX state logic tests ─────────────────────────────────────────────
+
+    mod tx_logic_tests {
+        use crate::tx_logic::TxState;
+        use crate::{EspnowMessage, TxCommand, TxResponse};
+
+        #[test]
+        fn initially_not_transmitting() {
+            let state = TxState::new();
+            assert!(!state.transmitting);
+            assert_eq!(state.tx_interval_ms, 100);
+        }
+
+        #[test]
+        fn start_transmit() {
+            let mut state = TxState::new();
+            let resp = state.handle_message(&EspnowMessage::TxCmd(TxCommand::StartTransmit));
+            assert!(state.transmitting);
+            assert_eq!(resp, Some(EspnowMessage::TxResp(TxResponse::Ack)));
+        }
+
+        #[test]
+        fn stop_transmit() {
+            let mut state = TxState::new();
+            state.transmitting = true;
+            let resp = state.handle_message(&EspnowMessage::TxCmd(TxCommand::StopTransmit));
+            assert!(!state.transmitting);
+            assert_eq!(resp, Some(EspnowMessage::TxResp(TxResponse::Ack)));
+        }
+
+        #[test]
+        fn configure_updates_interval() {
+            let mut state = TxState::new();
+            let resp = state.handle_message(&EspnowMessage::TxCmd(TxCommand::Configure {
+                channel: 6,
+                tx_power_dbm: 20,
+                packet_rate_hz: 200,
+            }));
+            assert_eq!(state.tx_interval_ms, 5); // 1000/200
+            assert_eq!(resp, Some(EspnowMessage::TxResp(TxResponse::Ack)));
+        }
+
+        #[test]
+        fn ignores_unrelated_messages() {
+            let mut state = TxState::new();
+            let resp = state.handle_message(&EspnowMessage::MeasurementBeacon);
+            assert!(resp.is_none());
+        }
+    }
+
+    // ── End-to-end measurement simulation ────────────────────────────────
+
+    mod measurement_simulation {
+        use crate::bridge_logic::{route_command, translate_response, RouteAction};
+        use crate::rx_logic::MeasurementState;
+        use crate::tx_logic::TxState;
+        use crate::*;
+
+        /// Helper: route a PcCommand and assert it routes to a specific role.
+        fn route_expect(cmd: &PcCommand, expected_role: Role) -> EspnowMessage {
+            match route_command(cmd) {
+                RouteAction::SendTo { role, msg } => {
+                    assert_eq!(role, expected_role);
+                    msg
+                }
+                RouteAction::Local => panic!("expected SendTo, got Local"),
+            }
+        }
+
+        /// Helper: do one measurement cycle at an angle. Returns (rssi_dbm, sample_count).
+        fn measure_at_angle(
+            rx: &mut MeasurementState,
+            rssi_samples: &[i32],
+        ) -> (f32, u16) {
+            let msg = route_expect(&PcCommand::StartMeasurement, Role::Rx);
+            let resp = rx.handle_message(&msg, 0);
+            assert!(resp.is_none());
+
+            for &rssi in rssi_samples {
+                rx.accumulate_rssi(rssi);
+            }
+
+            let msg = route_expect(&PcCommand::ReportMeasurement, Role::Rx);
+            let resp = rx.handle_message(&msg, 0).expect("should produce MeasurementResult");
+            let event = translate_response(&resp).expect("should translate");
+            match event {
+                DeviceEvent::Measurement { rssi_dbm, sample_count } => (rssi_dbm, sample_count),
+                other => panic!("expected Measurement, got {:?}", other),
+            }
+        }
+
+        /// Simulate a minimal single-angle measurement: PC sends commands through
+        /// the Bridge routing, TX and RX process them, and Bridge translates
+        /// responses back to DeviceEvents for the PC.
+        #[test]
+        fn single_angle_measurement() {
+            let mut tx = TxState::new();
+            let mut rx = MeasurementState::new();
+
+            // 1. PC -> Bridge -> TX: StartTransmitting
+            let msg = route_expect(&PcCommand::StartTransmitting, Role::Tx);
+            let resp = tx.handle_message(&msg);
+            assert!(tx.transmitting);
+            let event = translate_response(&resp.unwrap()).unwrap();
+            assert_eq!(event, DeviceEvent::TxAck);
+
+            // 2. PC -> Bridge -> Stepper: MoveTo 90°
+            let msg = route_expect(&PcCommand::MoveTo { angle_deg: 90.0 }, Role::Turntable);
+            assert_eq!(
+                msg,
+                EspnowMessage::TurntableCmd(TurntableCommand::MoveTo { angle_deg: 90.0 })
+            );
+            // Simulate turntable responding.
+            let turntable_resp =
+                EspnowMessage::TurntableResp(TurntableResponse::MoveComplete { angle_deg: 90.0 });
+            let event = translate_response(&turntable_resp).unwrap();
+            assert_eq!(event, DeviceEvent::MoveComplete { angle_deg: 90.0 });
+
+            // 3-5. StartMeasurement → accumulate RSSI → ReportMeasurement
+            let (rssi_dbm, sample_count) = measure_at_angle(&mut rx, &[-42, -44, -40, -43, -41]);
+            assert_eq!(sample_count, 5);
+            // Average of -42, -44, -40, -43, -41 = -210/5 = -42.0
+            assert!((rssi_dbm - (-42.0)).abs() < 0.01);
+
+            // 6. PC -> Bridge -> TX: StopTransmitting
+            let msg = route_expect(&PcCommand::StopTransmitting, Role::Tx);
+            tx.handle_message(&msg);
+            assert!(!tx.transmitting);
+        }
+
+        /// Simulate a full 3-angle sweep.
+        #[test]
+        fn three_angle_sweep() {
+            let mut tx = TxState::new();
+            let mut rx = MeasurementState::new();
+
+            // Start TX.
+            let msg = route_expect(&PcCommand::StartTransmitting, Role::Tx);
+            tx.handle_message(&msg);
+            assert!(tx.transmitting);
+
+            // Angle 0°: avg(-30,-32,-31) = -31.0, 3 samples
+            let _ = route_expect(&PcCommand::MoveTo { angle_deg: 0.0 }, Role::Turntable);
+            let (rssi, count) = measure_at_angle(&mut rx, &[-30, -32, -31]);
+            assert!((rssi - (-31.0)).abs() < 0.01);
+            assert_eq!(count, 3);
+
+            // Angle 10°: avg(-40,-42) = -41.0, 2 samples
+            let _ = route_expect(&PcCommand::MoveTo { angle_deg: 10.0 }, Role::Turntable);
+            let (rssi, count) = measure_at_angle(&mut rx, &[-40, -42]);
+            assert!((rssi - (-41.0)).abs() < 0.01);
+            assert_eq!(count, 2);
+
+            // Angle 20°: avg(-50,-48,-52,-49) = -49.75, 4 samples
+            let _ = route_expect(&PcCommand::MoveTo { angle_deg: 20.0 }, Role::Turntable);
+            let (rssi, count) = measure_at_angle(&mut rx, &[-50, -48, -52, -49]);
+            assert!((rssi - (-49.75)).abs() < 0.01);
+            assert_eq!(count, 4);
+
+            // Stop TX.
+            let msg = route_expect(&PcCommand::StopTransmitting, Role::Tx);
+            tx.handle_message(&msg);
+            assert!(!tx.transmitting);
+        }
     }
 
     // ── Stepper angle conversion tests ──────────────────────────────────────

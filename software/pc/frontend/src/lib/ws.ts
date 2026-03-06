@@ -16,9 +16,11 @@ export type SystemStatus = {
     sweeping: boolean;
     /** Whether the TX (transmitter) ESP32 is paired via ESP-NOW. */
     tx_connected: boolean;
+    /** Whether the RX (receiver) ESP32 is paired via ESP-NOW. */
+    rx_connected: boolean;
     /** Whether the turntable stepper ESP32 is paired via ESP-NOW. */
     turntable_connected: boolean;
-    /** Whether the PC is connected to the RX board over serial. */
+    /** Whether the PC is connected to the Bridge over serial. */
     serial_connected: boolean;
     /** Total data points collected in the current session. */
     data_points: number;
@@ -50,6 +52,7 @@ export type WsEvent =
           type: 'Status';
           sweeping: boolean;
           tx_connected: boolean;
+          rx_connected: boolean;
           turntable_connected: boolean;
           serial_connected: boolean;
           data_points: number;

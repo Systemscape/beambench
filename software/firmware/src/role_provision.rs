@@ -7,6 +7,8 @@ use beambench_protocol::Role;
 use defmt::info;
 
 /// Magic bytes to distinguish a provisioned role from erased flash (0xFF).
+/// Used by the real flash implementation (not yet implemented).
+#[allow(dead_code)]
 const MAGIC: [u8; 4] = [0xBE, 0xA1, 0x01, 0x00]; // "bea1" + version 0
 
 /// Determine the device role at boot.

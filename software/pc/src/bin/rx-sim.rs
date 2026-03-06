@@ -1,4 +1,4 @@
-//! Simulated RX board — speaks postcard+COBS over TCP.
+//! Simulated Bridge device — speaks postcard+COBS over TCP.
 //!
 //! Generates synthetic antenna patterns so you can test the full PC app
 //! UI without any ESP32 hardware.

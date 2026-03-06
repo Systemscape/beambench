@@ -14,6 +14,7 @@ use esp_radio::esp_now::{
 };
 
 use beambench_protocol::{self as proto, EspnowMessage, Role};
+use beambench_protocol::rx_logic::MeasurementState;
 
 use crate::common::*;
 use crate::mk_static;
@@ -22,12 +23,7 @@ struct RxState {
     bridge_paired: bool,
     bridge_mac: [u8; 6],
     last_bridge_seen: Option<Instant>,
-    /// Whether we are actively collecting RSSI samples.
-    measuring: bool,
-    /// Accumulated RSSI sum (for averaging).
-    rssi_sum: i64,
-    /// Number of samples accumulated.
-    rssi_count: u16,
+    measurement: MeasurementState,
 }
 
 impl RxState {
@@ -36,35 +32,8 @@ impl RxState {
             bridge_paired: false,
             bridge_mac: [0u8; 6],
             last_bridge_seen: None,
-            measuring: false,
-            rssi_sum: 0,
-            rssi_count: 0,
+            measurement: MeasurementState::new(),
         }
-    }
-
-    fn reset_measurement(&mut self) {
-        self.measuring = true;
-        self.rssi_sum = 0;
-        self.rssi_count = 0;
-    }
-
-    fn accumulate_rssi(&mut self, rssi: i32) {
-        if self.measuring {
-            self.rssi_sum += rssi as i64;
-            self.rssi_count += 1;
-        }
-    }
-
-    fn report_measurement(&mut self) -> (f32, u16) {
-        let result = if self.rssi_count == 0 {
-            (0.0, 0)
-        } else {
-            (self.rssi_sum as f32 / self.rssi_count as f32, self.rssi_count)
-        };
-        self.measuring = false;
-        self.rssi_sum = 0;
-        self.rssi_count = 0;
-        result
     }
 }
 
@@ -179,7 +148,6 @@ async fn rx_listener_task(
                 led_signal.signal(LedState::Solid(COLOR_GREEN));
             }
             Ok(EspnowMessage::Hello(hello)) if hello.role == Role::Bridge => {
-                // Bridge is broadcasting — treat as heartbeat if already paired.
                 let mut s = state.lock().await;
                 if !s.bridge_paired {
                     info!(
@@ -202,36 +170,38 @@ async fn rx_listener_task(
                 }
                 s.last_bridge_seen = Some(Instant::now());
             }
-            Ok(EspnowMessage::StartMeasurement) => {
+            Ok(ref espnow_msg @ EspnowMessage::StartMeasurement) => {
                 let mut s = state.lock().await;
                 s.last_bridge_seen = Some(Instant::now());
-                s.reset_measurement();
+                s.measurement.handle_message(espnow_msg, 0);
                 info!("Measurement started");
                 led_signal.signal(LedState::Blink { color: COLOR_AMBER, period_ms: 200 });
             }
-            Ok(EspnowMessage::ReportMeasurement) => {
+            Ok(ref espnow_msg @ EspnowMessage::ReportMeasurement) => {
                 let mut s = state.lock().await;
                 s.last_bridge_seen = Some(Instant::now());
-                let (rssi_dbm, sample_count) = s.report_measurement();
+                let resp = s.measurement.handle_message(espnow_msg, 0);
                 let bridge_mac = s.bridge_mac;
                 let paired = s.bridge_paired;
                 drop(s);
 
-                info!("Measurement report: {} dBm ({} samples)", rssi_dbm, sample_count);
+                if let Some(EspnowMessage::MeasurementResult { rssi_dbm, sample_count }) = &resp {
+                    info!("Measurement report: {} dBm ({} samples)", rssi_dbm, sample_count);
+                }
                 led_signal.signal(LedState::Solid(COLOR_GREEN));
 
                 if paired {
-                    let resp = EspnowMessage::MeasurementResult { rssi_dbm, sample_count };
-                    let mut buf = [0u8; proto::MAX_MSG_SIZE];
-                    if let Ok(data) = proto::serialize(&resp, &mut buf) {
-                        let mut s = sender.lock().await;
-                        let _ = s.send_async(&bridge_mac, data).await;
+                    if let Some(resp_msg) = resp {
+                        let mut buf = [0u8; proto::MAX_MSG_SIZE];
+                        if let Ok(data) = proto::serialize(&resp_msg, &mut buf) {
+                            let mut s = sender.lock().await;
+                            let _ = s.send_async(&bridge_mac, data).await;
+                        }
                     }
                 }
             }
             Ok(EspnowMessage::MeasurementBeacon) => {
-                // Accumulate RSSI from TX broadcast packets.
-                state.lock().await.accumulate_rssi(rssi);
+                state.lock().await.measurement.accumulate_rssi(rssi);
             }
             _ => {}
         }

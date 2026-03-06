@@ -1,27 +1,35 @@
-//! Sweep state machine — orchestrates a measurement campaign.
+//! Sweep orchestrator — drives a step-by-step measurement campaign via Bridge.
+//!
+//! For each angle: MoveTo → wait MoveComplete → StartMeasurement → wait
+//! measurement window → ReportMeasurement → wait Measurement result.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::{DataPoint, SweepConfig, WsEvent};
-use beambench_protocol::{PcToRx, RxToPc};
+use beambench_protocol::{DeviceEvent, PcCommand};
 use tokio::sync::{Mutex, mpsc};
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
-/// Timeout for waiting on a single response from the RX board during a sweep.
-///
-/// This covers the turntable move time plus RSSI sample collection. 30 s is
-/// generous — a 360° move at typical speed takes ~15 s, and RSSI collection
-/// adds a few seconds at most.
-const SWEEP_RECV_TIMEOUT: Duration = Duration::from_secs(30);
+/// Timeout for waiting on a turntable MoveComplete response.
+const MOVE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Timeout for waiting on a Measurement result after ReportMeasurement.
+const MEASUREMENT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Default settling delay after the turntable reaches the target angle.
+const SETTLING_DELAY: Duration = Duration::from_millis(200);
+
+/// Default measurement window between StartMeasurement and ReportMeasurement.
+const MEASUREMENT_WINDOW: Duration = Duration::from_millis(500);
 
 /// Run a sweep to completion, sending events to the WebSocket channel.
 ///
 /// Returns the collected data points on success.
 pub async fn run_sweep(
     config: SweepConfig,
-    serial_tx: &mpsc::Sender<PcToRx>,
-    serial_rx: &Arc<Mutex<mpsc::Receiver<RxToPc>>>,
+    serial_tx: &mpsc::Sender<PcCommand>,
+    serial_rx: &Arc<Mutex<mpsc::Receiver<DeviceEvent>>>,
     ws_tx: &tokio::sync::broadcast::Sender<WsEvent>,
 ) -> Result<Vec<DataPoint>, String> {
     config.validate()?;
@@ -31,72 +39,156 @@ pub async fn run_sweep(
         config.start_deg, config.stop_deg, config.step_deg, config.samples_per_angle
     );
 
-    // Send sweep command to RX board.
-    let cmd = PcToRx::StartSweep {
-        start_deg: config.start_deg,
-        stop_deg: config.stop_deg,
-        step_deg: config.step_deg,
-        samples_per_angle: config.samples_per_angle,
-    };
-
+    // Start TX transmitting.
     serial_tx
-        .send(cmd)
+        .send(PcCommand::StartTransmitting)
         .await
         .map_err(|_| "Serial connection lost".to_string())?;
 
-    let mut data = Vec::new();
-    let mut rx = serial_rx.lock().await;
+    // Wait briefly for TX ack (best-effort, don't fail if missed).
+    {
+        let mut rx = serial_rx.lock().await;
+        let _ = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match rx.recv().await {
+                    Some(DeviceEvent::TxAck) => return,
+                    Some(_) => continue,
+                    None => return,
+                }
+            }
+        })
+        .await;
+    }
 
-    // Collect data points until sweep completes or an error occurs.
-    loop {
-        let recv_result = tokio::time::timeout(SWEEP_RECV_TIMEOUT, rx.recv()).await;
-        match recv_result {
-            Err(_elapsed) => {
-                error!("Sweep timed out waiting for data from RX board");
-                let msg = "Sweep timed out waiting for data".to_string();
-                let _ = ws_tx.send(WsEvent::Error {
-                    message: msg.clone(),
-                });
-                return Err(msg);
+    let mut data = Vec::new();
+    let mut angle = config.start_deg;
+
+    while angle <= config.stop_deg {
+        // 1. Move turntable to angle.
+        serial_tx
+            .send(PcCommand::MoveTo { angle_deg: angle })
+            .await
+            .map_err(|_| "Serial connection lost".to_string())?;
+
+        // 2. Wait for MoveComplete.
+        wait_for_move_complete(serial_rx, ws_tx).await?;
+
+        // 3. Settling delay.
+        tokio::time::sleep(SETTLING_DELAY).await;
+
+        // 4. Start measurement (resets accumulator on RX).
+        serial_tx
+            .send(PcCommand::StartMeasurement)
+            .await
+            .map_err(|_| "Serial connection lost".to_string())?;
+
+        // 5. Measurement window.
+        tokio::time::sleep(MEASUREMENT_WINDOW).await;
+
+        // 6. Report measurement.
+        serial_tx
+            .send(PcCommand::ReportMeasurement)
+            .await
+            .map_err(|_| "Serial connection lost".to_string())?;
+
+        // 7. Wait for Measurement result.
+        let (rssi_dbm, sample_count) = wait_for_measurement(serial_rx, ws_tx).await?;
+
+        let dp = DataPoint {
+            angle_deg: angle,
+            rssi_dbm,
+            sample_count,
+        };
+        let _ = ws_tx.send(WsEvent::DataPoint(dp.clone()));
+        data.push(dp);
+
+        angle += config.step_deg;
+    }
+
+    // Stop TX.
+    let _ = serial_tx.send(PcCommand::StopTransmitting).await;
+
+    info!("Sweep complete, {} data points collected", data.len());
+    let _ = ws_tx.send(WsEvent::SweepComplete);
+    Ok(data)
+}
+
+/// Wait for a MoveComplete event, skipping other events.
+async fn wait_for_move_complete(
+    serial_rx: &Arc<Mutex<mpsc::Receiver<DeviceEvent>>>,
+    ws_tx: &tokio::sync::broadcast::Sender<WsEvent>,
+) -> Result<f32, String> {
+    let mut rx = serial_rx.lock().await;
+    let result = tokio::time::timeout(MOVE_TIMEOUT, async {
+        loop {
+            match rx.recv().await {
+                Some(DeviceEvent::MoveComplete { angle_deg }) => return Ok(angle_deg),
+                Some(DeviceEvent::StepperError { description }) => {
+                    return Err(description.to_string());
+                }
+                Some(DeviceEvent::Error { description }) => {
+                    return Err(description.to_string());
+                }
+                Some(_) => continue,
+                None => return Err("Serial connection lost".to_string()),
             }
-            Ok(None) => {
-                error!("Serial connection closed during sweep");
-                return Err("Serial connection lost".to_string());
-            }
-            Ok(Some(msg)) => match msg {
-                RxToPc::DataPoint {
-                    angle_deg,
+        }
+    })
+    .await;
+
+    match result {
+        Ok(Ok(angle)) => Ok(angle),
+        Ok(Err(e)) => {
+            let _ = ws_tx.send(WsEvent::Error { message: e.clone() });
+            Err(e)
+        }
+        Err(_) => {
+            let msg = "Turntable move timed out".to_string();
+            error!("{}", msg);
+            let _ = ws_tx.send(WsEvent::Error {
+                message: msg.clone(),
+            });
+            Err(msg)
+        }
+    }
+}
+
+/// Wait for a Measurement event after ReportMeasurement.
+async fn wait_for_measurement(
+    serial_rx: &Arc<Mutex<mpsc::Receiver<DeviceEvent>>>,
+    ws_tx: &tokio::sync::broadcast::Sender<WsEvent>,
+) -> Result<(f32, u16), String> {
+    let mut rx = serial_rx.lock().await;
+    let result = tokio::time::timeout(MEASUREMENT_TIMEOUT, async {
+        loop {
+            match rx.recv().await {
+                Some(DeviceEvent::Measurement {
                     rssi_dbm,
                     sample_count,
-                } => {
-                    let dp = DataPoint {
-                        angle_deg,
-                        rssi_dbm,
-                        sample_count,
-                    };
-                    let _ = ws_tx.send(WsEvent::DataPoint(dp.clone()));
-                    data.push(dp);
+                }) => return Ok((rssi_dbm, sample_count)),
+                Some(DeviceEvent::Error { description }) => {
+                    return Err(description.to_string());
                 }
-                RxToPc::SweepComplete => {
-                    info!("Sweep complete, {} data points collected", data.len());
-                    let _ = ws_tx.send(WsEvent::SweepComplete);
-                    return Ok(data);
-                }
-                RxToPc::Error { description } => {
-                    let msg = description.to_string();
-                    warn!("RX reported error during sweep: {}", msg);
-                    let _ = ws_tx.send(WsEvent::Error {
-                        message: msg.clone(),
-                    });
-                    return Err(msg);
-                }
-                RxToPc::HomeComplete => {
-                    // HomeComplete shouldn't arrive during a sweep, but be exhaustive.
-                }
-                RxToPc::Status { .. } => {
-                    // Ignore status updates during sweep.
-                }
-            },
+                Some(_) => continue,
+                None => return Err("Serial connection lost".to_string()),
+            }
+        }
+    })
+    .await;
+
+    match result {
+        Ok(Ok(data)) => Ok(data),
+        Ok(Err(e)) => {
+            let _ = ws_tx.send(WsEvent::Error { message: e.clone() });
+            Err(e)
+        }
+        Err(_) => {
+            let msg = "Measurement timed out".to_string();
+            error!("{}", msg);
+            let _ = ws_tx.send(WsEvent::Error {
+                message: msg.clone(),
+            });
+            Err(msg)
         }
     }
 }
@@ -104,8 +196,7 @@ pub async fn run_sweep(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use beambench_protocol::RxToPc;
-    use heapless::String as HString;
+    use beambench_protocol::DeviceEvent;
     use tokio::sync::{broadcast, mpsc};
 
     fn test_config() -> SweepConfig {
@@ -117,36 +208,56 @@ mod tests {
         }
     }
 
-    fn shared_rx(rx: mpsc::Receiver<RxToPc>) -> Arc<Mutex<mpsc::Receiver<RxToPc>>> {
+    fn shared_rx(rx: mpsc::Receiver<DeviceEvent>) -> Arc<Mutex<mpsc::Receiver<DeviceEvent>>> {
         Arc::new(Mutex::new(rx))
     }
 
     #[tokio::test]
     async fn sweep_collects_data_points() {
-        let (serial_tx, _serial_cmd_rx) = mpsc::channel::<PcToRx>(32);
-        let (resp_tx, resp_rx) = mpsc::channel::<RxToPc>(64);
+        let (serial_tx, mut serial_cmd_rx) = mpsc::channel::<PcCommand>(32);
+        let (resp_tx, resp_rx) = mpsc::channel::<DeviceEvent>(64);
         let (ws_tx, mut ws_rx) = broadcast::channel::<WsEvent>(64);
         let resp_rx = shared_rx(resp_rx);
 
         let config = test_config();
-        let handle = tokio::spawn(async move { run_sweep(config, &serial_tx, &resp_rx, &ws_tx).await });
+        let handle = tokio::spawn(async move {
+            run_sweep(config, &serial_tx, &resp_rx, &ws_tx).await
+        });
 
-        // Feed 3 data points then SweepComplete
-        for i in 0..3 {
-            resp_tx
-                .send(RxToPc::DataPoint {
-                    angle_deg: i as f32 * 10.0,
-                    rssi_dbm: -40.0 + i as f32,
-                    sample_count: 5,
-                })
-                .await
-                .unwrap();
-        }
-        resp_tx.send(RxToPc::SweepComplete).await.unwrap();
+        // Respond to commands from the sweep orchestrator.
+        tokio::spawn(async move {
+            while let Some(cmd) = serial_cmd_rx.recv().await {
+                match cmd {
+                    PcCommand::StartTransmitting => {
+                        resp_tx.send(DeviceEvent::TxAck).await.unwrap();
+                    }
+                    PcCommand::MoveTo { angle_deg } => {
+                        resp_tx
+                            .send(DeviceEvent::MoveComplete { angle_deg })
+                            .await
+                            .unwrap();
+                    }
+                    PcCommand::StartMeasurement => {
+                        // No response needed.
+                    }
+                    PcCommand::ReportMeasurement => {
+                        resp_tx
+                            .send(DeviceEvent::Measurement {
+                                rssi_dbm: -40.0,
+                                sample_count: 5,
+                            })
+                            .await
+                            .unwrap();
+                    }
+                    PcCommand::StopTransmitting => {}
+                    _ => {}
+                }
+            }
+        });
 
         let result = handle.await.unwrap();
         let data = result.expect("sweep should succeed");
-        assert_eq!(data.len(), 3);
+        assert_eq!(data.len(), 3); // 0, 10, 20
         assert_eq!(data[0].angle_deg, 0.0);
         assert_eq!(data[1].angle_deg, 10.0);
         assert_eq!(data[2].angle_deg, 20.0);
@@ -166,36 +277,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sweep_handles_error() {
-        let (serial_tx, _serial_cmd_rx) = mpsc::channel::<PcToRx>(32);
-        let (resp_tx, resp_rx) = mpsc::channel::<RxToPc>(64);
+    async fn sweep_handles_stepper_error() {
+        let (serial_tx, mut serial_cmd_rx) = mpsc::channel::<PcCommand>(32);
+        let (resp_tx, resp_rx) = mpsc::channel::<DeviceEvent>(64);
         let (ws_tx, mut ws_rx) = broadcast::channel::<WsEvent>(64);
         let resp_rx = shared_rx(resp_rx);
 
         let config = test_config();
-        let handle = tokio::spawn(async move { run_sweep(config, &serial_tx, &resp_rx, &ws_tx).await });
+        let handle = tokio::spawn(async move {
+            run_sweep(config, &serial_tx, &resp_rx, &ws_tx).await
+        });
 
-        // Send one data point, then an error
-        resp_tx
-            .send(RxToPc::DataPoint {
-                angle_deg: 0.0,
-                rssi_dbm: -40.0,
-                sample_count: 5,
-            })
-            .await
-            .unwrap();
-        resp_tx
-            .send(RxToPc::Error {
-                description: HString::try_from("motor fault").unwrap(),
-            })
-            .await
-            .unwrap();
+        tokio::spawn(async move {
+            while let Some(cmd) = serial_cmd_rx.recv().await {
+                match cmd {
+                    PcCommand::StartTransmitting => {
+                        resp_tx.send(DeviceEvent::TxAck).await.unwrap();
+                    }
+                    PcCommand::MoveTo { .. } => {
+                        resp_tx
+                            .send(DeviceEvent::StepperError {
+                                description: heapless::String::try_from("motor fault").unwrap(),
+                            })
+                            .await
+                            .unwrap();
+                    }
+                    _ => {}
+                }
+            }
+        });
 
         let result = handle.await.unwrap();
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), "motor fault");
 
-        // Verify error was broadcast
         let mut got_error = false;
         while let Ok(ev) = ws_rx.try_recv() {
             if let WsEvent::Error { message } = ev {
@@ -208,15 +323,17 @@ mod tests {
 
     #[tokio::test]
     async fn sweep_handles_disconnection() {
-        let (serial_tx, _serial_cmd_rx) = mpsc::channel::<PcToRx>(32);
-        let (resp_tx, resp_rx) = mpsc::channel::<RxToPc>(64);
+        let (serial_tx, _serial_cmd_rx) = mpsc::channel::<PcCommand>(32);
+        let (resp_tx, resp_rx) = mpsc::channel::<DeviceEvent>(64);
         let (ws_tx, _ws_rx) = broadcast::channel::<WsEvent>(64);
         let resp_rx = shared_rx(resp_rx);
 
         let config = test_config();
-        let handle = tokio::spawn(async move { run_sweep(config, &serial_tx, &resp_rx, &ws_tx).await });
+        let handle = tokio::spawn(async move {
+            run_sweep(config, &serial_tx, &resp_rx, &ws_tx).await
+        });
 
-        // Drop the sender to simulate disconnection
+        // Drop the sender to simulate disconnection.
         drop(resp_tx);
 
         let result = handle.await.unwrap();
@@ -225,23 +342,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sweep_times_out_when_no_response() {
-        let (serial_tx, _serial_cmd_rx) = mpsc::channel::<PcToRx>(32);
-        let (_resp_tx, resp_rx) = mpsc::channel::<RxToPc>(64);
+    async fn sweep_times_out_when_no_move_response() {
+        let (serial_tx, _serial_cmd_rx) = mpsc::channel::<PcCommand>(32);
+        let (_resp_tx, resp_rx) = mpsc::channel::<DeviceEvent>(64);
         let (ws_tx, _ws_rx) = broadcast::channel::<WsEvent>(64);
         let resp_rx = shared_rx(resp_rx);
 
         let config = test_config();
 
-        // Use a very short timeout for testing by overriding via tokio::time::pause
         tokio::time::pause();
 
         let handle = tokio::spawn(async move {
             run_sweep(config, &serial_tx, &resp_rx, &ws_tx).await
         });
 
-        // Advance time past the timeout
-        tokio::time::advance(SWEEP_RECV_TIMEOUT + Duration::from_secs(1)).await;
+        // Advance past TX ack timeout + move timeout.
+        tokio::time::advance(Duration::from_secs(2) + MOVE_TIMEOUT + Duration::from_secs(1)).await;
 
         let result = handle.await.unwrap();
         assert!(result.is_err());
@@ -249,54 +365,5 @@ mod tests {
             result.unwrap_err().contains("timed out"),
             "error should mention timeout"
         );
-    }
-
-    #[tokio::test]
-    async fn sweep_allows_subsequent_operations() {
-        let (serial_tx, _serial_cmd_rx) = mpsc::channel::<PcToRx>(32);
-        let (resp_tx, resp_rx) = mpsc::channel::<RxToPc>(64);
-        let (ws_tx, _ws_rx) = broadcast::channel::<WsEvent>(64);
-        let resp_rx = shared_rx(resp_rx);
-
-        // First sweep
-        let config = test_config();
-        let rx_clone = resp_rx.clone();
-        let tx_ref = serial_tx.clone();
-        let ws_ref = ws_tx.clone();
-        let handle = tokio::spawn(async move {
-            run_sweep(config, &tx_ref, &rx_clone, &ws_ref).await
-        });
-
-        resp_tx
-            .send(RxToPc::DataPoint {
-                angle_deg: 0.0,
-                rssi_dbm: -40.0,
-                sample_count: 5,
-            })
-            .await
-            .unwrap();
-        resp_tx.send(RxToPc::SweepComplete).await.unwrap();
-        let result = handle.await.unwrap();
-        assert!(result.is_ok());
-
-        // Second sweep — should work because rx is shared, not consumed
-        let config2 = test_config();
-        let rx_clone2 = resp_rx.clone();
-        let handle2 = tokio::spawn(async move {
-            run_sweep(config2, &serial_tx, &rx_clone2, &ws_tx).await
-        });
-
-        resp_tx
-            .send(RxToPc::DataPoint {
-                angle_deg: 10.0,
-                rssi_dbm: -35.0,
-                sample_count: 5,
-            })
-            .await
-            .unwrap();
-        resp_tx.send(RxToPc::SweepComplete).await.unwrap();
-        let result2 = handle2.await.unwrap();
-        assert!(result2.is_ok());
-        assert_eq!(result2.unwrap().len(), 1);
     }
 }

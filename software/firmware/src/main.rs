@@ -26,6 +26,8 @@ use esp_hal::{
     rmt::Rmt,
     time::Rate,
     timer::timg::TimerGroup,
+    usb_serial_jtag::{UsbSerialJtag, UsbSerialJtagRx, UsbSerialJtagTx},
+    Async,
 };
 use esp_hal_smartled::{buffer_size, color_order, RmtSmartLeds, Sk68xxTiming};
 use esp_radio::esp_now::{EspNowManager, EspNowSender};
@@ -33,6 +35,8 @@ use smart_leds::{SmartLedsWrite, RGB8};
 
 use beambench_protocol::Role;
 use common::*;
+
+type Led = RmtSmartLeds<'static, { buffer_size::<RGB8>(1) }, esp_hal::Blocking, RGB8, color_order::Grb, Sk68xxTiming>;
 
 #[defmt::panic_handler]
 fn defmt_panic() -> ! {
@@ -96,6 +100,9 @@ async fn main(spawner: Spawner) -> ! {
 
     let led_signal = mk_static!(Signal<NoopRawMutex, LedState>, Signal::new());
 
+    let led = mk_static!(Led, led);
+    spawner.spawn(led_task(led, led_signal)).ok();
+
     // ── ESP-NOW split ────────────────────────────────────────────────────────
 
     let (manager, sender, receiver) = esp_now.split();
@@ -109,7 +116,11 @@ async fn main(spawner: Spawner) -> ! {
 
     match role {
         Role::Bridge => {
-            bridge::run(spawner, manager, sender, receiver, led_signal).await;
+            let usb_serial = UsbSerialJtag::new(peripherals.USB_DEVICE).into_async();
+            let (usb_rx, usb_tx) = usb_serial.split();
+            let usb_rx = mk_static!(UsbSerialJtagRx<'static, Async>, usb_rx);
+            let usb_tx = mk_static!(UsbSerialJtagTx<'static, Async>, usb_tx);
+            bridge::run(spawner, manager, sender, receiver, led_signal, usb_rx, usb_tx).await;
         }
         Role::Rx => {
             rx::run(spawner, manager, sender, receiver, led_signal).await;
@@ -153,4 +164,12 @@ async fn main(spawner: Spawner) -> ! {
     loop {
         embassy_time::Timer::after(embassy_time::Duration::from_secs(3600)).await;
     }
+}
+
+#[embassy_executor::task]
+async fn led_task(
+    led: &'static mut Led,
+    led_signal: &'static Signal<NoopRawMutex, LedState>,
+) {
+    run_led_loop(led, led_signal, LedState::Blink { color: COLOR_BLUE, period_ms: 500 }).await;
 }

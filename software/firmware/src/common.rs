@@ -21,7 +21,7 @@ pub enum LedState {
     Blink { color: RGB8, period_ms: u64 },
 }
 
-/// Drives the LED state machine forever. Call from the main loop.
+/// Drives the LED state machine forever. Spawned as `led_task` in main.
 pub async fn run_led_loop(
     led: &mut impl SmartLedsWrite<Color = RGB8>,
     led_signal: &Signal<NoopRawMutex, LedState>,

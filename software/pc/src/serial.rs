@@ -1,14 +1,14 @@
-//! Serial communication with the RX board using postcard + COBS framing.
+//! Serial communication with the Bridge device using postcard + COBS framing.
 
 use std::sync::Arc;
 
-use beambench_protocol::{PcToRx, RxToPc};
+use beambench_protocol::{DeviceEvent, PcCommand};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Mutex, mpsc};
 use tokio_serial::SerialPortBuilderExt;
 use tracing::{debug, error, info, warn};
 
-/// Baud rate for the USB-serial connection to the RX board.
+/// Baud rate for the USB-serial connection to the Bridge.
 const BAUD_RATE: u32 = 115_200;
 
 /// Buffer size for COBS frame encoding/decoding.
@@ -18,14 +18,14 @@ const COBS_BUF_SIZE: usize = 512;
 /// growth if COBS delimiters are missing (e.g. noise on the line).
 const MAX_ACCUM_SIZE: usize = 1024;
 
-/// Handle to an active serial (or TCP) connection to the RX board.
+/// Handle to an active serial (or TCP) connection to the Bridge device.
 ///
 /// Spawns background reader/writer tasks that bridge between typed channels
 /// and the raw COBS-framed byte stream. Drop or call [`close()`](Self::close)
 /// to shut down both tasks.
 pub struct SerialHandle {
-    pub tx: mpsc::Sender<PcToRx>,
-    pub rx: Arc<Mutex<mpsc::Receiver<RxToPc>>>,
+    pub tx: mpsc::Sender<PcCommand>,
+    pub rx: Arc<Mutex<mpsc::Receiver<DeviceEvent>>>,
     cancel: tokio::sync::watch::Sender<bool>,
 }
 
@@ -35,8 +35,8 @@ impl SerialHandle {
         let port = tokio_serial::new(port_name, BAUD_RATE).open_native_async()?;
         let (reader, writer) = tokio::io::split(port);
 
-        let (cmd_tx, cmd_rx) = mpsc::channel::<PcToRx>(32);
-        let (resp_tx, resp_rx) = mpsc::channel::<RxToPc>(64);
+        let (cmd_tx, cmd_rx) = mpsc::channel::<PcCommand>(32);
+        let (resp_tx, resp_rx) = mpsc::channel::<DeviceEvent>(64);
         let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
 
         tokio::spawn(writer_task(writer, cmd_rx, cancel_rx.clone()));
@@ -51,13 +51,13 @@ impl SerialHandle {
         })
     }
 
-    /// Open a TCP connection (e.g. to rx-sim) and spawn reader/writer tasks.
+    /// Open a TCP connection (e.g. to bridge-sim) and spawn reader/writer tasks.
     pub async fn open_tcp(addr: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let stream = tokio::net::TcpStream::connect(addr).await?;
         let (reader, writer) = tokio::io::split(stream);
 
-        let (cmd_tx, cmd_rx) = mpsc::channel::<PcToRx>(32);
-        let (resp_tx, resp_rx) = mpsc::channel::<RxToPc>(64);
+        let (cmd_tx, cmd_rx) = mpsc::channel::<PcCommand>(32);
+        let (resp_tx, resp_rx) = mpsc::channel::<DeviceEvent>(64);
         let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
 
         tokio::spawn(writer_task(writer, cmd_rx, cancel_rx.clone()));
@@ -80,7 +80,7 @@ impl SerialHandle {
 
 async fn writer_task<W: AsyncWriteExt + Unpin>(
     mut writer: W,
-    mut commands: mpsc::Receiver<PcToRx>,
+    mut commands: mpsc::Receiver<PcCommand>,
     mut cancel: tokio::sync::watch::Receiver<bool>,
 ) {
     let mut buf = [0u8; COBS_BUF_SIZE];
@@ -110,7 +110,7 @@ async fn writer_task<W: AsyncWriteExt + Unpin>(
 
 async fn reader_task<R: AsyncReadExt + Unpin>(
     mut reader: R,
-    responses: mpsc::Sender<RxToPc>,
+    responses: mpsc::Sender<DeviceEvent>,
     mut cancel: tokio::sync::watch::Receiver<bool>,
 ) {
     let mut raw_buf = [0u8; COBS_BUF_SIZE];
@@ -166,11 +166,11 @@ async fn reader_task<R: AsyncReadExt + Unpin>(
     }
 }
 
-/// Default address for the rx-sim simulator.
+/// Default address for the bridge-sim simulator.
 const SIM_ADDR: &str = "127.0.0.1:9876";
 
 /// List available serial ports with descriptions. Also probes the default
-/// rx-sim TCP address and includes it if reachable.
+/// bridge-sim TCP address and includes it if reachable.
 pub async fn list_ports() -> Vec<crate::PortInfo> {
     let mut ports: Vec<crate::PortInfo> = tokio_serial::available_ports()
         .unwrap_or_default()
@@ -214,7 +214,7 @@ pub async fn list_ports() -> Vec<crate::PortInfo> {
             0,
             crate::PortInfo {
                 name: format!("tcp://{}", SIM_ADDR),
-                description: "RX Simulator".to_string(),
+                description: "Bridge Simulator".to_string(),
             },
         );
     }
@@ -225,10 +225,10 @@ pub async fn list_ports() -> Vec<crate::PortInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use beambench_protocol::{MAX_MSG_SIZE, RxToPc};
+    use beambench_protocol::{DeviceEvent, MAX_MSG_SIZE};
 
-    /// Encode an RxToPc message as a COBS frame (ready to write to a stream).
-    fn encode_cobs_frame(msg: &RxToPc) -> Vec<u8> {
+    /// Encode a DeviceEvent message as a COBS frame (ready to write to a stream).
+    fn encode_cobs_frame(msg: &DeviceEvent) -> Vec<u8> {
         let mut buf = [0u8; MAX_MSG_SIZE];
         let len = beambench_protocol::serialize_cobs(msg, &mut buf).unwrap();
         buf[..len].to_vec()
@@ -236,19 +236,18 @@ mod tests {
 
     #[tokio::test]
     async fn reader_decodes_single_frame() {
-        let msg = RxToPc::SweepComplete;
+        let msg = DeviceEvent::HomeComplete;
         let frame = encode_cobs_frame(&msg);
 
-        let (resp_tx, mut resp_rx) = mpsc::channel::<RxToPc>(16);
+        let (resp_tx, mut resp_rx) = mpsc::channel::<DeviceEvent>(16);
         let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
 
-        // DuplexStream: write to `writer`, reader_task reads from `reader`
         let (mut writer, reader) = tokio::io::duplex(1024);
 
         tokio::spawn(reader_task(reader, resp_tx, cancel_rx));
 
         writer.write_all(&frame).await.unwrap();
-        drop(writer); // EOF signals reader to stop
+        drop(writer);
 
         let decoded = resp_rx.recv().await.expect("should receive decoded message");
         assert_eq!(decoded, msg);
@@ -256,15 +255,14 @@ mod tests {
 
     #[tokio::test]
     async fn reader_handles_fragmented_frames() {
-        let msg = RxToPc::DataPoint {
-            angle_deg: 45.0,
+        let msg = DeviceEvent::Measurement {
             rssi_dbm: -30.0,
             sample_count: 10,
         };
         let frame = encode_cobs_frame(&msg);
         assert!(frame.len() > 2, "frame should be long enough to split");
 
-        let (resp_tx, mut resp_rx) = mpsc::channel::<RxToPc>(16);
+        let (resp_tx, mut resp_rx) = mpsc::channel::<DeviceEvent>(16);
         let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
 
         let (mut writer, reader) = tokio::io::duplex(1024);
@@ -284,8 +282,7 @@ mod tests {
 
     #[tokio::test]
     async fn reader_resets_on_oversized_accumulation() {
-        // Write >MAX_ACCUM_SIZE bytes without a COBS delimiter, then a valid frame.
-        let (resp_tx, mut resp_rx) = mpsc::channel::<RxToPc>(16);
+        let (resp_tx, mut resp_rx) = mpsc::channel::<DeviceEvent>(16);
         let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
 
         let (mut writer, reader) = tokio::io::duplex(4096);
@@ -298,7 +295,7 @@ mod tests {
         tokio::task::yield_now().await;
 
         // Now write a valid frame — reader should have reset and decode this.
-        let msg = RxToPc::SweepComplete;
+        let msg = DeviceEvent::HomeComplete;
         let frame = encode_cobs_frame(&msg);
         writer.write_all(&frame).await.unwrap();
         drop(writer);
@@ -309,16 +306,15 @@ mod tests {
 
     #[tokio::test]
     async fn reader_handles_multiple_frames_in_one_read() {
-        let msg1 = RxToPc::SweepComplete;
-        let msg2 = RxToPc::DataPoint {
-            angle_deg: 90.0,
+        let msg1 = DeviceEvent::HomeComplete;
+        let msg2 = DeviceEvent::Measurement {
             rssi_dbm: -50.0,
             sample_count: 5,
         };
         let mut combined = encode_cobs_frame(&msg1);
         combined.extend_from_slice(&encode_cobs_frame(&msg2));
 
-        let (resp_tx, mut resp_rx) = mpsc::channel::<RxToPc>(16);
+        let (resp_tx, mut resp_rx) = mpsc::channel::<DeviceEvent>(16);
         let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
 
         let (mut writer, reader) = tokio::io::duplex(1024);

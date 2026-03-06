@@ -36,6 +36,7 @@
     let status: SystemStatus = $state({
         sweeping: false,
         tx_connected: false,
+        rx_connected: false,
         turntable_connected: false,
         serial_connected: false,
         data_points: 0
@@ -134,6 +135,7 @@
                 status = {
                     sweeping: event.sweeping,
                     tx_connected: event.tx_connected,
+                    rx_connected: event.rx_connected,
                     turntable_connected: event.turntable_connected,
                     serial_connected: event.serial_connected,
                     data_points: event.data_points
@@ -383,9 +385,11 @@
                 <div class="status-indicators">
                     <span
                         class="indicator"
-                        class:active={status.serial_connected}>Serial</span>
+                        class:active={status.serial_connected}>Bridge</span>
                     <span class="indicator" class:active={status.tx_connected}
                         >TX</span>
+                    <span class="indicator" class:active={status.rx_connected}
+                        >RX</span>
                     <span
                         class="indicator"
                         class:active={status.turntable_connected}

@@ -40,13 +40,13 @@ pub struct TxConfig {
 pub struct SystemStatus {
     /// Whether an antenna pattern sweep is in progress.
     pub sweeping: bool,
-    /// Whether the TX ESP32 is paired via ESP-NOW. Only meaningful when
-    /// `serial_connected` is `true` — otherwise the value may be stale.
+    /// Whether the TX ESP32 is paired via ESP-NOW.
     pub tx_connected: bool,
-    /// Whether the turntable ESP32 is paired via ESP-NOW. Only meaningful
-    /// when `serial_connected` is `true`.
+    /// Whether the RX ESP32 is paired via ESP-NOW.
+    pub rx_connected: bool,
+    /// Whether the turntable ESP32 is paired via ESP-NOW.
     pub turntable_connected: bool,
-    /// Whether the PC is connected to the RX board over serial/TCP.
+    /// Whether the PC is connected to the Bridge over serial/TCP.
     pub serial_connected: bool,
     /// Number of data points stored on the backend.
     pub data_points: usize,
@@ -210,6 +210,7 @@ mod tests {
         json_round_trip(&WsEvent::Status(SystemStatus {
             sweeping: true,
             tx_connected: false,
+            rx_connected: true,
             turntable_connected: true,
             serial_connected: true,
             data_points: 42,

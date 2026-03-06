@@ -23,13 +23,12 @@ use beambench_pc::{PortInfo, SystemStatus, WsCommand, WsEvent, export_csv};
 /// Gives the USB-serial interface time to stabilize.
 const VERIFY_INITIAL_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
 
-/// Timeout for the device verification probe. The RX board responds in <100 ms;
+/// Timeout for the device verification probe. The Bridge responds in <100 ms;
 /// 1 s is generous enough for slow USB bridges while still detecting wrong
 /// devices quickly.
 const VERIFY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// Timeout for the ReturnHome completion response from the RX board.
-/// Matches the sweep turntable move timeout (30 s).
+/// Timeout for the ReturnHome completion response from the Bridge.
 const HOME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Parser)]
@@ -51,7 +50,7 @@ struct FrontendAssets;
 struct AppState {
     /// Broadcast channel for pushing events to all connected WebSocket clients.
     ws_tx: broadcast::Sender<WsEvent>,
-    /// Active serial/TCP connection to the RX board (if any).
+    /// Active serial/TCP connection to the Bridge device (if any).
     serial: Mutex<Option<beambench_pc::serial::SerialHandle>>,
     /// Measurement data from the most recent (or in-progress) sweep.
     data: Mutex<Vec<beambench_pc::DataPoint>>,
@@ -60,6 +59,7 @@ struct AppState {
     /// homing and blocks sweep starts while the turntable is returning.
     homing: AtomicBool,
     tx_connected: AtomicBool,
+    rx_connected: AtomicBool,
     turntable_connected: AtomicBool,
 }
 
@@ -73,6 +73,7 @@ impl AppState {
         SystemStatus {
             sweeping: self.sweeping.load(Ordering::SeqCst),
             tx_connected: serial_connected && self.tx_connected.load(Ordering::SeqCst),
+            rx_connected: serial_connected && self.rx_connected.load(Ordering::SeqCst),
             turntable_connected: serial_connected
                 && self.turntable_connected.load(Ordering::SeqCst),
             serial_connected,
@@ -116,6 +117,7 @@ async fn main() {
         sweeping: AtomicBool::new(false),
         homing: AtomicBool::new(false),
         tx_connected: AtomicBool::new(false),
+        rx_connected: AtomicBool::new(false),
         turntable_connected: AtomicBool::new(false),
     });
 
@@ -260,6 +262,7 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
                         message: format!("Connected to {}, verifying device...", port),
                     });
                     state.tx_connected.store(false, Ordering::SeqCst);
+                    state.rx_connected.store(false, Ordering::SeqCst);
                     state.turntable_connected.store(false, Ordering::SeqCst);
                     state.broadcast_status().await;
 
@@ -268,7 +271,7 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
                     let port_name = port.clone();
                     tokio::spawn(async move {
                         tokio::time::sleep(VERIFY_INITIAL_DELAY).await;
-                        let _ = serial_tx.send(beambench_protocol::PcToRx::QueryStatus).await;
+                        let _ = serial_tx.send(beambench_protocol::PcCommand::QueryStatus).await;
 
                         let result = tokio::time::timeout(
                             VERIFY_TIMEOUT,
@@ -280,22 +283,24 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
                         .await;
 
                         match result {
-                            Ok(Some(beambench_protocol::RxToPc::Status { tx_connected, turntable_connected, .. })) => {
-                                tracing::info!("Device verified as RX board");
+                            Ok(Some(beambench_protocol::DeviceEvent::Status { tx_connected, rx_connected, stepper_connected })) => {
+                                tracing::info!("Device verified as Bridge");
                                 let _ = state.ws_tx.send(WsEvent::Log {
-                                    message: format!("{} confirmed as RX board (TX: {}, Turntable: {})",
+                                    message: format!("{} confirmed as Bridge (TX: {}, RX: {}, Stepper: {})",
                                         port_name,
                                         if tx_connected { "connected" } else { "not found" },
-                                        if turntable_connected { "connected" } else { "not found" }),
+                                        if rx_connected { "connected" } else { "not found" },
+                                        if stepper_connected { "connected" } else { "not found" }),
                                 });
                                 state.tx_connected.store(tx_connected, Ordering::SeqCst);
-                                state.turntable_connected.store(turntable_connected, Ordering::SeqCst);
+                                state.rx_connected.store(rx_connected, Ordering::SeqCst);
+                                state.turntable_connected.store(stepper_connected, Ordering::SeqCst);
                                 state.broadcast_status().await;
                             }
                             Ok(Some(other)) => {
                                 tracing::info!("Unexpected response from device: {:?}", other);
                                 let _ = state.ws_tx.send(WsEvent::Log {
-                                    message: format!("{}: got unexpected response — may not be RX board", port_name),
+                                    message: format!("{}: got unexpected response — may not be Bridge", port_name),
                                 });
                             }
                             Ok(None) => {
@@ -305,10 +310,10 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
                                 });
                             }
                             Err(_) => {
-                                tracing::warn!("No response from {} — not an RX board or firmware not running", port_name);
+                                tracing::warn!("No response from {} — not a Bridge or firmware not running", port_name);
                                 state.broadcast_error(
-                                    &format!("{}: no response — this is probably not the RX board", port_name),
-                                    "Device did not respond. Is this the RX board?",
+                                    &format!("{}: no response — is this the Bridge device?", port_name),
+                                    "Device did not respond. Is this the Bridge?",
                                 );
                             }
                         }
@@ -335,6 +340,7 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
                 message: "Disconnected".to_string(),
             });
             state.tx_connected.store(false, Ordering::SeqCst);
+            state.rx_connected.store(false, Ordering::SeqCst);
             state.turntable_connected.store(false, Ordering::SeqCst);
             state.broadcast_status().await;
         }
@@ -403,7 +409,8 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
         WsCommand::Stop => {
             let serial = state.serial.lock().await;
             if let Some(ref handle) = *serial {
-                let _ = handle.tx.send(beambench_protocol::PcToRx::Stop).await;
+                let _ = handle.tx.send(beambench_protocol::PcCommand::StopTransmitting).await;
+                let _ = handle.tx.send(beambench_protocol::PcCommand::StopStepper).await;
             }
         }
         WsCommand::ConfigureTx(tx_config) => {
@@ -411,7 +418,7 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
             if let Some(ref handle) = *serial {
                 let _ = handle
                     .tx
-                    .send(beambench_protocol::PcToRx::ConfigureTx {
+                    .send(beambench_protocol::PcCommand::ConfigureTx {
                         channel: tx_config.channel,
                         tx_power_dbm: tx_config.tx_power_dbm,
                         packet_rate_hz: tx_config.packet_rate_hz,
@@ -422,7 +429,7 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
         WsCommand::QueryStatus => {
             let serial = state.serial.lock().await;
             if let Some(ref handle) = *serial {
-                let _ = handle.tx.send(beambench_protocol::PcToRx::QueryStatus).await;
+                let _ = handle.tx.send(beambench_protocol::PcCommand::QueryStatus).await;
             }
         }
         WsCommand::ExportCsv => {
@@ -454,17 +461,21 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
 
                 let state = state.clone();
                 tokio::spawn(async move {
-                    let _ = serial_tx.send(beambench_protocol::PcToRx::ReturnHome).await;
+                    let _ = serial_tx.send(beambench_protocol::PcCommand::ReturnHome).await;
 
                     let result = tokio::time::timeout(HOME_TIMEOUT, async {
                         let mut rx = serial_rx.lock().await;
                         loop {
                             match rx.recv().await {
-                                Some(beambench_protocol::RxToPc::HomeComplete) => return Ok(()),
-                                Some(beambench_protocol::RxToPc::Error { description }) => {
+                                Some(beambench_protocol::DeviceEvent::HomeComplete) => return Ok(()),
+                                Some(beambench_protocol::DeviceEvent::MoveComplete { angle_deg }) if angle_deg == 0.0 => return Ok(()),
+                                Some(beambench_protocol::DeviceEvent::StepperError { description }) => {
                                     return Err(description.to_string());
                                 }
-                                Some(_) => continue, // Skip Status, DataPoint, etc.
+                                Some(beambench_protocol::DeviceEvent::Error { description }) => {
+                                    return Err(description.to_string());
+                                }
+                                Some(_) => continue,
                                 None => return Err("Serial connection lost".to_string()),
                             }
                         }
