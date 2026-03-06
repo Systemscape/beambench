@@ -15,12 +15,35 @@ use serde::{Deserialize, Serialize};
 // ── Board roles (used during ESPNOW discovery) ──────────────────────────────
 
 /// Role a board advertises during ESPNOW discovery.
+///
+/// Explicit `#[repr(u8)]` discriminants ensure the stored role byte in flash
+/// remains stable across firmware versions that add or reorder variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[repr(u8)]
 pub enum Role {
-    Rx,
-    Tx,
-    Turntable,
+    Rx = 0,
+    Tx = 1,
+    Turntable = 2,
+    Bridge = 3,
+}
+
+impl Role {
+    /// Serialize to a single byte for flash storage.
+    pub fn to_byte(self) -> u8 {
+        self as u8
+    }
+
+    /// Deserialize from a flash-stored byte.
+    pub fn from_byte(b: u8) -> Option<Self> {
+        match b {
+            0 => Some(Role::Rx),
+            1 => Some(Role::Tx),
+            2 => Some(Role::Turntable),
+            3 => Some(Role::Bridge),
+            _ => None,
+        }
+    }
 }
 
 // ── ESPNOW discovery messages ───────────────────────────────────────────────
@@ -119,6 +142,17 @@ pub enum EspnowMessage {
     // TX
     TxCmd(TxCommand),
     TxResp(TxResponse),
+
+    // Measurement (v2)
+    /// Broadcast by TX at configured rate. RX accumulates RSSI from these
+    /// only when actively measuring.
+    MeasurementBeacon,
+    /// Bridge -> RX: reset accumulator and start collecting.
+    StartMeasurement,
+    /// Bridge -> RX: stop collecting, report result.
+    ReportMeasurement,
+    /// RX -> Bridge: measurement result.
+    MeasurementResult { rssi_dbm: f32, sample_count: u16 },
 }
 
 // ── Serial protocol messages (PC ↔ RX) ──────────────────────────────────────

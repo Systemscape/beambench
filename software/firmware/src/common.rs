@@ -1,0 +1,76 @@
+//! Shared code for all firmware roles: LED control, ESP-NOW init, discovery helpers.
+
+use embassy_futures::select::{select, Either};
+use embassy_time::{Duration, Timer};
+use smart_leds::{SmartLedsWrite, RGB8};
+
+use embassy_sync::{blocking_mutex::raw::NoopRawMutex, signal::Signal};
+
+// ── LED colors (dim — SK6812 is very bright) ────────────────────────────────
+
+pub const COLOR_BLUE: RGB8 = RGB8 { r: 0, g: 0, b: 20 };
+pub const COLOR_GREEN: RGB8 = RGB8 { r: 0, g: 20, b: 0 };
+pub const COLOR_AMBER: RGB8 = RGB8 { r: 20, g: 6, b: 0 };
+pub const COLOR_OFF: RGB8 = RGB8 { r: 0, g: 0, b: 0 };
+
+// ── LED state machine ───────────────────────────────────────────────────────
+
+#[derive(Clone, Copy)]
+pub enum LedState {
+    Solid(RGB8),
+    Blink { color: RGB8, period_ms: u64 },
+}
+
+/// Drives the LED state machine forever. Call from the main loop.
+pub async fn run_led_loop(
+    led: &mut impl SmartLedsWrite<Color = RGB8>,
+    led_signal: &Signal<NoopRawMutex, LedState>,
+    initial: LedState,
+) {
+    let mut led_state = initial;
+    loop {
+        match led_state {
+            LedState::Solid(color) => {
+                let _ = led.write(core::iter::once(color));
+                led_state = led_signal.wait().await;
+            }
+            LedState::Blink { color, period_ms } => {
+                let half = Duration::from_millis(period_ms / 2);
+                loop {
+                    let _ = led.write(core::iter::once(color));
+                    match select(led_signal.wait(), Timer::after(half)).await {
+                        Either::First(new) => {
+                            led_state = new;
+                            break;
+                        }
+                        Either::Second(_) => {}
+                    }
+                    let _ = led.write(core::iter::once(COLOR_OFF));
+                    match select(led_signal.wait(), Timer::after(half)).await {
+                        Either::First(new) => {
+                            led_state = new;
+                            break;
+                        }
+                        Either::Second(_) => {}
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ── mk_static! macro ────────────────────────────────────────────────────────
+
+#[macro_export]
+macro_rules! mk_static {
+    ($t:ty, $val:expr) => {{
+        static STATIC_CELL: static_cell::StaticCell<$t> = static_cell::StaticCell::new();
+        STATIC_CELL.uninit().write($val)
+    }};
+}
+
+// ── ESP-NOW channel ─────────────────────────────────────────────────────────
+
+pub const DEFAULT_CHANNEL: u8 = 11;
+pub const BEACON_INTERVAL: Duration = Duration::from_secs(1);
+pub const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(15);

@@ -461,7 +461,7 @@ async fn handle_hello(
                     false
                 }
             }
-            Role::Rx => return, // Ignore other RX boards.
+            Role::Rx | Role::Bridge => return, // Ignore other RX/Bridge boards.
         }
     };
 
@@ -498,7 +498,7 @@ async fn handle_hello(
                     s.turntable_mac = *src;
                     s.last_turntable_seen = Some(Instant::now());
                 }
-                Role::Rx => {}
+                Role::Rx | Role::Bridge => {}
             }
         }
     }

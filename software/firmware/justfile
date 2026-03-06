@@ -1,0 +1,27 @@
+# Beambench unified firmware
+
+default:
+    just --list
+
+build:
+    cargo build --release
+
+check:
+    cargo check
+
+# Flash with role provisioning (writes role to flash, then runs)
+flash-rx:
+    cargo run --release --features role-rx
+
+flash-tx:
+    cargo run --release --features role-tx
+
+flash-stepper:
+    cargo run --release --features role-stepper
+
+flash-bridge:
+    cargo run --release --features role-bridge
+
+# Flash without provisioning (uses role already stored in flash)
+flash:
+    cargo run --release
