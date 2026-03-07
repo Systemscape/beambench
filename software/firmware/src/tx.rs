@@ -172,7 +172,7 @@ async fn tx_listener_task(
             }
             Ok(ref espnow_msg) if crate::ota_responder::is_ota_message(espnow_msg) => {
                 let bridge_mac = state.lock().await.bridge_mac;
-                crate::ota_responder::process_and_respond(espnow_msg, ota, flash, sender, &bridge_mac).await;
+                crate::ota_responder::process_and_respond(espnow_msg, ota, flash, sender, &bridge_mac, led_signal).await;
             }
             _ => {}
         }

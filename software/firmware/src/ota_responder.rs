@@ -4,7 +4,7 @@
 //! verifies SHA-256, switches the boot slot, and reboots.
 
 use defmt::info;
-use embassy_sync::{blocking_mutex::raw::NoopRawMutex, mutex::Mutex};
+use embassy_sync::{blocking_mutex::raw::NoopRawMutex, mutex::Mutex, signal::Signal};
 use embedded_storage::Storage;
 use esp_radio::esp_now::EspNowSender;
 use sha2::{Digest, Sha256};
@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use beambench_protocol::{self as proto, EspnowMessage, OTA_CHUNK_SIZE};
 use esp_bootloader_esp_idf::partitions;
 
-use crate::common::SharedFlash;
+use crate::common::{SharedFlash, LedState, COLOR_RED, COLOR_GREEN};
 
 const CHUNK_SIZE: u32 = OTA_CHUNK_SIZE as u32;
 
@@ -80,17 +80,28 @@ pub fn is_ota_message(msg: &EspnowMessage) -> bool {
 /// Handle an OTA message, send the response to the Bridge, and reboot if complete.
 ///
 /// Call this from each role's listener task when `is_ota_message()` returns true.
+/// Sets the LED to blinking red during OTA and restores solid green when done.
 pub async fn process_and_respond(
     msg: &EspnowMessage,
     ota: &Mutex<NoopRawMutex, OtaState>,
     flash: &SharedFlash,
     sender: &Mutex<NoopRawMutex, EspNowSender<'static>>,
     bridge_mac: &[u8; 6],
+    led_signal: &Signal<NoopRawMutex, LedState>,
 ) {
+    // Start blinking red on OtaBegin.
+    if matches!(msg, EspnowMessage::OtaBegin { .. }) {
+        led_signal.signal(LedState::Blink { color: COLOR_RED, period_ms: 200 });
+    }
+
     if let Some(resp) = handle_ota_message(msg, ota, flash).await {
+        let is_done = matches!(resp, EspnowMessage::OtaComplete | EspnowMessage::OtaError { .. });
         send_ota_response(sender, bridge_mac, &resp).await;
         if matches!(resp, EspnowMessage::OtaComplete) {
             schedule_reboot().await;
+        }
+        if is_done {
+            led_signal.signal(LedState::Solid(COLOR_GREEN));
         }
     }
 }

@@ -1,5 +1,9 @@
 # Beambench unified firmware
 
+elf := "target/riscv32imc-unknown-none-elf/release/beambench-firmware"
+app_image := "target/firmware.bin"
+pc_url := env("BEAMBENCH_URL", "http://127.0.0.1:3000")
+
 default:
     just --list
 
@@ -9,19 +13,44 @@ build:
 check:
     cargo check
 
-# Flash with role provisioning (writes role to flash, then runs)
+# Provision a board: builds with the role feature, flashes bootloader +
+# partition table + firmware via espflash. Use once per board.
 flash-rx:
-    cargo run --release --features role-rx
+    cargo build --release --features role-rx
+    espflash flash --monitor --partition-table partitions.csv {{elf}}
 
 flash-tx:
-    cargo run --release --features role-tx
+    cargo build --release --features role-tx
+    espflash flash --monitor --partition-table partitions.csv {{elf}}
 
 flash-turntable:
-    cargo run --release --features role-turntable
+    cargo build --release --features role-turntable
+    espflash flash --monitor --partition-table partitions.csv {{elf}}
 
 flash-bridge:
-    cargo run --release --features role-bridge
+    cargo build --release --features role-bridge
+    espflash flash --monitor --partition-table partitions.csv {{elf}}
 
-# Flash without provisioning (uses role already stored in flash)
+# Dev flash via espflash (no provisioning, uses role already in flash)
 flash:
-    cargo run --release
+    cargo build --release
+    espflash flash --monitor --partition-table partitions.csv {{elf}}
+
+# Attach probe-rs for defmt logging (flash separately, then run this)
+monitor:
+    probe-rs attach --chip esp32c3 {{elf}}
+
+# Build firmware app image for OTA
+_ota-image:
+    cargo build --release
+    espflash save-image --chip esp32c3 {{elf}} {{app_image}}
+
+# OTA update via the PC app's REST API
+ota-rx: _ota-image
+    curl -f -F target=rx -F file=@{{app_image}} {{pc_url}}/api/ota
+
+ota-tx: _ota-image
+    curl -f -F target=tx -F file=@{{app_image}} {{pc_url}}/api/ota
+
+ota-turntable: _ota-image
+    curl -f -F target=turntable -F file=@{{app_image}} {{pc_url}}/api/ota

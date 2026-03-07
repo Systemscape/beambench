@@ -55,7 +55,7 @@ pub async fn run(
         .spawn(turntable_discovery_task(sender, bridge_mac, last_bridge_seen, manager, led_signal))
         .ok();
     spawner
-        .spawn(turntable_listener_task(manager, sender, receiver, bridge_mac, last_bridge_seen, motor_cmd, flash, ota))
+        .spawn(turntable_listener_task(manager, sender, receiver, bridge_mac, last_bridge_seen, motor_cmd, flash, ota, led_signal))
         .ok();
     spawner
         .spawn(turntable_responder_task(sender, bridge_mac, motor_result))
@@ -124,6 +124,7 @@ async fn turntable_listener_task(
     motor_cmd: &'static Signal<NoopRawMutex, MotorCmd>,
     flash: &'static SharedFlash,
     ota: &'static Mutex<NoopRawMutex, crate::ota_responder::OtaState>,
+    led_signal: &'static Signal<NoopRawMutex, LedState>,
 ) {
     loop {
         let received = receiver.receive_async().await;
@@ -171,7 +172,7 @@ async fn turntable_listener_task(
             }
             Ok(ref espnow_msg) if crate::ota_responder::is_ota_message(espnow_msg) => {
                 if let Some(peer) = *bridge_mac.lock().await {
-                    crate::ota_responder::process_and_respond(espnow_msg, ota, flash, sender, &peer).await;
+                    crate::ota_responder::process_and_respond(espnow_msg, ota, flash, sender, &peer, led_signal).await;
                 }
             }
             _ => {}

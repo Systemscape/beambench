@@ -10,6 +10,7 @@ use embassy_sync::{blocking_mutex::raw::NoopRawMutex, signal::Signal};
 
 pub const COLOR_BLUE: RGB8 = RGB8 { r: 0, g: 0, b: 20 };
 pub const COLOR_GREEN: RGB8 = RGB8 { r: 0, g: 20, b: 0 };
+pub const COLOR_RED: RGB8 = RGB8 { r: 20, g: 0, b: 0 };
 pub const COLOR_AMBER: RGB8 = RGB8 { r: 20, g: 6, b: 0 };
 pub const COLOR_OFF: RGB8 = RGB8 { r: 0, g: 0, b: 0 };
 

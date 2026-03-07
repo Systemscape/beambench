@@ -68,13 +68,6 @@
     // WebSocket connection state
     let wsConnected = $state(false);
 
-    // OTA state
-    let otaInProgress = $state(false);
-    let otaChunksSent = $state(0);
-    let otaTotalChunks = $state(0);
-    let otaTarget = $state('rx');
-    let otaFile: File | null = $state(null);
-
     /** Client-side mirror of SweepConfig::validate(). */
     let configError: string | null = $derived.by(() => {
         if (stepDeg <= 0) return 'Step size must be positive';
@@ -150,14 +143,14 @@
                 turntableAngle = event.angle_deg;
                 addLog(`Turntable at ${event.angle_deg.toFixed(1)}°`);
                 break;
-            case 'OtaProgress':
-                otaChunksSent = event.chunks_sent;
-                otaTotalChunks = event.total_chunks;
+            case 'OtaProgress': {
+                const pct = Math.round(event.chunks_sent / event.total_chunks * 100);
+                if (pct % 10 === 0 || event.chunks_sent === event.total_chunks) {
+                    addLog(`OTA progress: ${pct}% (${event.chunks_sent}/${event.total_chunks} chunks)`);
+                }
                 break;
+            }
             case 'OtaFinished':
-                otaInProgress = false;
-                otaChunksSent = 0;
-                otaTotalChunks = 0;
                 addLog('OTA complete — device will reboot');
                 break;
             case 'Status':
@@ -177,7 +170,6 @@
                 stopping = false;
                 homing = false;
                 jogging = false;
-                otaInProgress = false;
                 errorMessage = event.message;
                 addLog(`Error: ${event.message}`);
                 setTimeout(() => {
@@ -345,33 +337,6 @@
         ws?.send({ type: 'Jog', delta_deg: delta });
     }
 
-    async function startOta() {
-        if (!otaFile) return;
-        otaInProgress = true;
-        otaChunksSent = 0;
-        otaTotalChunks = 0;
-
-        const formData = new FormData();
-        formData.append('target', otaTarget);
-        formData.append('file', otaFile);
-
-        try {
-            const res = await fetch('/api/ota', { method: 'POST', body: formData });
-            const json = await res.json();
-            if (json.error) {
-                otaInProgress = false;
-                errorMessage = json.error;
-                addLog(`OTA failed: ${json.error}`);
-                setTimeout(() => { errorMessage = ''; }, 5000);
-            }
-        } catch (e) {
-            otaInProgress = false;
-            errorMessage = 'Failed to upload firmware';
-            addLog('OTA upload failed');
-            setTimeout(() => { errorMessage = ''; }, 5000);
-        }
-    }
-
     function toggleMeasurement(id: number) {
         measurements = measurements.map((m) =>
             m.id === id ? { ...m, visible: !m.visible } : m
@@ -513,42 +478,42 @@
 
             <section>
                 <h2>Sweep Configuration</h2>
-                <div class="field">
-                    <label for="start">Start angle (deg)</label>
-                    <input id="start" type="number" bind:value={startDeg} />
-                </div>
-                <div class="field">
-                    <label for="stop">Stop angle (deg)</label>
-                    <input id="stop" type="number" bind:value={stopDeg} />
-                </div>
-                <div class="field">
-                    <label for="step">Step size (deg)</label>
-                    <input
-                        id="step"
-                        type="number"
-                        bind:value={stepDeg}
-                        min="0.1"
-                        step="0.5" />
-                </div>
-                <div class="field">
-                    <label for="samples">Samples per angle</label>
-                    <input
-                        id="samples"
-                        type="number"
-                        bind:value={samplesPerAngle}
-                        min="1" />
+                <div class="sweep-grid">
+                    <div class="field">
+                        <label for="start">Start (deg)</label>
+                        <input id="start" type="number" bind:value={startDeg} />
+                    </div>
+                    <div class="field">
+                        <label for="stop">Stop (deg)</label>
+                        <input id="stop" type="number" bind:value={stopDeg} />
+                    </div>
+                    <div class="field">
+                        <label for="step">Step (deg)</label>
+                        <input
+                            id="step"
+                            type="number"
+                            bind:value={stepDeg}
+                            min="0.1"
+                            step="0.5" />
+                    </div>
+                    <div class="field">
+                        <label for="samples">Samples</label>
+                        <input
+                            id="samples"
+                            type="number"
+                            bind:value={samplesPerAngle}
+                            min="1" />
+                    </div>
                 </div>
                 {#if configError}
                     <p class="validation-error">{configError}</p>
                 {/if}
-                <div class="button-row">
+                <div class="connect-row">
                     <button
                         onclick={startSweep}
                         disabled={!status.serial_connected || status.sweeping || homing || !!configError}>
                         Start Sweep
                     </button>
-                </div>
-                <div class="button-row">
                     <button
                         class="danger"
                         onclick={stopSweep}
@@ -620,43 +585,10 @@
                 </a>
             </section>
 
-            <section>
-                <h2>OTA Update</h2>
-                <div class="field">
-                    <label for="ota-target">Target device</label>
-                    <select id="ota-target" bind:value={otaTarget} disabled={otaInProgress}>
-                        <option value="rx">RX (Receiver)</option>
-                        <option value="tx">TX (Transmitter)</option>
-                        <option value="turntable">Turntable</option>
-                    </select>
-                </div>
-                <div class="field">
-                    <label for="ota-file">Firmware binary</label>
-                    <input
-                        id="ota-file"
-                        type="file"
-                        accept=".bin"
-                        disabled={otaInProgress}
-                        onchange={(e) => { otaFile = (e.target as HTMLInputElement).files?.[0] ?? null; }} />
-                </div>
-                {#if otaInProgress}
-                    {#if otaTotalChunks > 0}
-                        <progress value={otaChunksSent} max={otaTotalChunks}></progress>
-                        <p class="info">{Math.round(otaChunksSent / otaTotalChunks * 100)}%
-                            ({otaChunksSent}/{otaTotalChunks} chunks)</p>
-                    {:else}
-                        <p class="info">Waiting for device&hellip;</p>
-                    {/if}
-                {/if}
-                <div class="button-row">
-                    <button
-                        onclick={startOta}
-                        disabled={!otaFile || !status.serial_connected || otaInProgress || status.sweeping}>
-                        {otaInProgress ? 'Updating...' : 'Start OTA Update'}
-                    </button>
-                </div>
-            </section>
+        </div>
 
+        <div class="main-area">
+            <div class="plot" bind:this={plotDiv}></div>
             <section class="log-section">
                 <h2>Log</h2>
                 <div class="log" bind:this={logDiv}>
@@ -669,8 +601,6 @@
                 </div>
             </section>
         </div>
-
-        <div class="plot" bind:this={plotDiv}></div>
     </div>
 </main>
 
@@ -687,8 +617,6 @@
 
     main {
         padding: 1.5rem;
-        max-width: 1400px;
-        margin: 0 auto;
     }
 
     h1 {
@@ -738,6 +666,17 @@
         display: flex;
         flex-direction: column;
         gap: 1rem;
+        overflow-y: auto;
+    }
+
+    .sweep-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 0.4rem 0.6rem;
+    }
+
+    .sweep-grid .field {
+        margin-bottom: 0;
     }
 
     section {
@@ -858,6 +797,14 @@
         margin: 0.5rem 0 0;
     }
 
+    .main-area {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        gap: 1rem;
+        min-width: 0;
+    }
+
     .plot {
         flex: 1;
         min-height: 400px;
@@ -871,7 +818,6 @@
     }
 
     .log-section {
-        flex: 1;
         display: flex;
         flex-direction: column;
         min-height: 0;
@@ -884,8 +830,8 @@
         font-size: 0.75rem;
         line-height: 1.5;
         color: #999;
-        min-height: 80px;
-        max-height: 200px;
+        min-height: 120px;
+        max-height: 300px;
     }
 
     .log-entry {
@@ -980,27 +926,4 @@
         font-style: italic;
     }
 
-    progress {
-        width: 100%;
-        height: 6px;
-        border: none;
-        border-radius: 3px;
-        background: #222;
-        margin-top: 0.5rem;
-    }
-
-    progress::-webkit-progress-bar {
-        background: #222;
-        border-radius: 3px;
-    }
-
-    progress::-webkit-progress-value {
-        background: #4caf50;
-        border-radius: 3px;
-    }
-
-    progress::-moz-progress-bar {
-        background: #4caf50;
-        border-radius: 3px;
-    }
 </style>

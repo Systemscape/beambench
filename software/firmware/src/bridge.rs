@@ -126,6 +126,7 @@ pub async fn run(
             receiver,
             peers,
             event_ch.sender(),
+            led_signal,
         ))
         .ok();
     spawner
@@ -134,6 +135,7 @@ pub async fn run(
             sender,
             peers,
             event_ch.sender(),
+            led_signal,
         ))
         .ok();
     spawner
@@ -156,6 +158,7 @@ async fn bridge_serial_rx_task(
     sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
     peers: &'static Mutex<NoopRawMutex, PeerTable>,
     event_tx: Sender<'static, NoopRawMutex, DeviceEvent, 8>,
+    led_signal: &'static Signal<NoopRawMutex, LedState>,
 ) {
     let mut raw_buf = [0u8; 64];
     let mut accum: heapless::Vec<u8, COBS_BUF_SIZE> = heapless::Vec::new();
@@ -180,7 +183,7 @@ async fn bridge_serial_rx_task(
                     match postcard::from_bytes_cobs::<PcCommand>(&mut frame_buf[..len + 1]) {
                         Ok(cmd) => {
                             info!("PC cmd: {:?}", defmt::Debug2Format(&cmd));
-                            handle_pc_command(cmd, sender, peers, &event_tx).await;
+                            handle_pc_command(cmd, sender, peers, &event_tx, led_signal).await;
                         }
                         Err(_) => {
                             info!("Failed to decode PcCommand ({} bytes)", len);
@@ -202,7 +205,11 @@ async fn handle_pc_command(
     sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
     peers: &'static Mutex<NoopRawMutex, PeerTable>,
     event_tx: &Sender<'static, NoopRawMutex, DeviceEvent, 8>,
+    led_signal: &'static Signal<NoopRawMutex, LedState>,
 ) {
+    if matches!(cmd, PcCommand::OtaBegin { .. }) {
+        led_signal.signal(LedState::Blink { color: COLOR_RED, period_ms: 200 });
+    }
     match bridge_logic::route_command(&cmd) {
         bridge_logic::RouteAction::SendTo { role, msg } => {
             send_to_role(sender, peers, role, &msg, event_tx).await;
@@ -326,6 +333,7 @@ async fn bridge_listener_task(
     mut receiver: EspNowReceiver<'static>,
     peers: &'static Mutex<NoopRawMutex, PeerTable>,
     event_tx: Sender<'static, NoopRawMutex, DeviceEvent, 8>,
+    led_signal: &'static Signal<NoopRawMutex, LedState>,
 ) {
     loop {
         let received = receiver.receive_async().await;
@@ -378,6 +386,11 @@ async fn bridge_listener_task(
                     if let Some(role) = role {
                         p.update_seen(role);
                     }
+                }
+                // Restore LED after OTA completes or fails.
+                if matches!(espnow_msg, EspnowMessage::OtaComplete | EspnowMessage::OtaError { .. }) {
+                    let all = peers.lock().await.all_connected();
+                    signal_pairing_led(led_signal, all);
                 }
                 if let Some(event) = bridge_logic::translate_response(espnow_msg) {
                     event_tx.send(event).await;
