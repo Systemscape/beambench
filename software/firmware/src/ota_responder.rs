@@ -12,7 +12,8 @@ use sha2::{Digest, Sha256};
 use beambench_protocol::{self as proto, EspnowMessage, OTA_CHUNK_SIZE};
 use esp_bootloader_esp_idf::partitions;
 
-use crate::common::{SharedFlash, LedState, COLOR_RED, COLOR_GREEN};
+use core::sync::atomic::Ordering;
+use crate::common::{SharedFlash, LedState, COLOR_RED, COLOR_GREEN, OTA_IN_PROGRESS};
 
 const CHUNK_SIZE: u32 = OTA_CHUNK_SIZE as u32;
 
@@ -91,6 +92,7 @@ pub async fn process_and_respond(
 ) {
     // Start blinking red on OtaBegin.
     if matches!(msg, EspnowMessage::OtaBegin { .. }) {
+        OTA_IN_PROGRESS.store(true, Ordering::Relaxed);
         led_signal.signal(LedState::Blink { color: COLOR_RED, period_ms: 200 });
     }
 
@@ -101,6 +103,7 @@ pub async fn process_and_respond(
             schedule_reboot().await;
         }
         if is_done {
+            OTA_IN_PROGRESS.store(false, Ordering::Relaxed);
             led_signal.signal(LedState::Solid(COLOR_GREEN));
         }
     }

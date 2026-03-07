@@ -208,6 +208,7 @@ async fn handle_pc_command(
     led_signal: &'static Signal<NoopRawMutex, LedState>,
 ) {
     if matches!(cmd, PcCommand::OtaBegin { .. }) {
+        OTA_IN_PROGRESS.store(true, core::sync::atomic::Ordering::Relaxed);
         led_signal.signal(LedState::Blink { color: COLOR_RED, period_ms: 200 });
     }
     match bridge_logic::route_command(&cmd) {
@@ -389,6 +390,7 @@ async fn bridge_listener_task(
                 }
                 // Restore LED after OTA completes or fails.
                 if matches!(espnow_msg, EspnowMessage::OtaComplete | EspnowMessage::OtaError { .. }) {
+                    OTA_IN_PROGRESS.store(false, core::sync::atomic::Ordering::Relaxed);
                     let all = peers.lock().await.all_connected();
                     signal_pairing_led(led_signal, all);
                 }

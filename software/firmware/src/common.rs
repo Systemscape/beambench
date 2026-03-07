@@ -4,7 +4,12 @@ use embassy_futures::select::{select, Either};
 use embassy_time::{Duration, Timer};
 use smart_leds::{SmartLedsWrite, RGB8};
 
+use core::sync::atomic::{AtomicBool, Ordering};
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, signal::Signal};
+
+/// Global flag set during OTA updates to prevent discovery tasks from
+/// overriding the LED state.
+pub static OTA_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
 // ── LED colors (dim — SK6812 is very bright) ────────────────────────────────
 
@@ -97,10 +102,14 @@ pub fn ensure_peer(manager: &esp_radio::esp_now::EspNowManager, mac: &[u8; 6]) {
 }
 
 /// Signal LED to reflect pairing state: solid green when paired, blinking blue otherwise.
+/// Skipped while OTA is in progress to avoid overriding the red blink.
 pub fn signal_pairing_led(
     led_signal: &Signal<NoopRawMutex, LedState>,
     paired: bool,
 ) {
+    if OTA_IN_PROGRESS.load(Ordering::Relaxed) {
+        return;
+    }
     if paired {
         led_signal.signal(LedState::Solid(COLOR_GREEN));
     } else {
