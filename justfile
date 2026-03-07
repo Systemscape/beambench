@@ -4,11 +4,9 @@
 default:
     just --list
 
-# Build all firmware crates
+# Build unified firmware
 build-firmware:
-    just software/stepper/build
-    just software/tx/build
-    just software/rx/build
+    just software/firmware/build
 
 # Build PC application (backend + frontend)
 build-pc:
@@ -22,7 +20,5 @@ test:
 # Check all crates compile
 check:
     just software/protocol/check
-    just software/stepper/check
-    just software/tx/check
-    just software/rx/check
+    just software/firmware/check
     just software/pc/check
