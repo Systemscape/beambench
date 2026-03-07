@@ -625,7 +625,7 @@
         ></div>
 
         <div class="main-area">
-            <div class="plot" style="height: calc(100% - {logHeight + 6}px)" bind:this={plotDiv}></div>
+            <div class="plot" bind:this={plotDiv}></div>
             <!-- svelte-ignore a11y_no_static_element_interactions -->
             <div
                 class="resize-handle-v"
@@ -654,7 +654,7 @@
             -apple-system,
             sans-serif;
         background: #111;
-        color: #ddd;
+        color: #eee;
     }
 
     main {
@@ -672,7 +672,7 @@
         margin: 0 0 0.75rem;
         font-size: 0.75rem;
         font-weight: 600;
-        color: #888;
+        color: #aaa;
         text-transform: uppercase;
         letter-spacing: 0.08em;
     }
@@ -737,7 +737,7 @@
 
     section {
         background: #1a1a1a;
-        border: 1px solid #2a2a2a;
+        border: 1.5px solid #3a3a3a;
         border-radius: 6px;
         padding: 1rem;
     }
@@ -749,7 +749,7 @@
     .field label {
         display: block;
         font-size: 0.8rem;
-        color: #777;
+        color: #aaa;
         margin-bottom: 0.25rem;
     }
 
@@ -757,17 +757,17 @@
     select {
         width: 100%;
         padding: 0.45rem 0.5rem;
-        border: 1px solid #333;
+        border: 1.5px solid #444;
         border-radius: 4px;
         background: #222;
-        color: #ddd;
+        color: #eee;
         font-size: 0.85rem;
         box-sizing: border-box;
     }
 
     input:focus {
         outline: none;
-        border-color: #555;
+        border-color: #666;
     }
 
     .connect-row {
@@ -782,10 +782,10 @@
 
     button {
         padding: 0.5rem 1rem;
-        border: 1px solid #444;
+        border: 1.5px solid #555;
         border-radius: 4px;
         background: #222;
-        color: #ddd;
+        color: #eee;
         cursor: pointer;
         font-size: 0.85rem;
         width: 100%;
@@ -793,7 +793,7 @@
 
     button:hover:not(:disabled) {
         background: #333;
-        border-color: #555;
+        border-color: #777;
     }
 
     button:disabled {
@@ -802,8 +802,8 @@
     }
 
     button.secondary {
-        color: #888;
-        border-color: #333;
+        color: #bbb;
+        border-color: #444;
     }
 
     button.danger {
@@ -831,8 +831,8 @@
         padding: 0.2rem 0.5rem;
         border-radius: 3px;
         background: #222;
-        border: 1px solid #333;
-        color: #555;
+        border: 1.5px solid #444;
+        color: #777;
     }
 
     .indicator.active {
@@ -849,7 +849,7 @@
 
     .info {
         font-size: 0.8rem;
-        color: #666;
+        color: #999;
         margin: 0.5rem 0 0;
     }
 
@@ -858,13 +858,15 @@
         display: flex;
         flex-direction: column;
         min-width: 0;
+        overflow: hidden;
         padding-left: 0.75rem;
     }
 
     .plot {
+        flex: 1;
         min-height: 200px;
         background: #1a1a1a;
-        border: 1px solid #2a2a2a;
+        border: 1.5px solid #3a3a3a;
         border-radius: 6px;
     }
 
@@ -888,8 +890,7 @@
     .log-section {
         display: flex;
         flex-direction: column;
-        flex-shrink: 0;
-        min-height: 0;
+        flex: none;
     }
 
     .log {
@@ -898,7 +899,7 @@
         font-family: monospace;
         font-size: 0.75rem;
         line-height: 1.5;
-        color: #999;
+        color: #bbb;
     }
 
     .log-entry {
@@ -907,7 +908,7 @@
     }
 
     .log-ts {
-        color: #555;
+        color: #777;
     }
 
     .measurements-header {
@@ -938,7 +939,7 @@
         align-items: center;
         gap: 0.4rem;
         font-size: 0.8rem;
-        color: #bbb;
+        color: #ddd;
         cursor: pointer;
     }
 
@@ -966,7 +967,7 @@
         font-size: 1rem;
         width: auto;
         line-height: 1;
-        color: #666;
+        color: #888;
         border: none;
         background: transparent;
     }
