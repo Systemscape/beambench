@@ -73,11 +73,13 @@ pub fn route_command(cmd: &PcCommand) -> RouteAction {
             target,
             total_size,
             sha256,
+            ack_interval,
         } => RouteAction::SendTo {
             role: *target,
             msg: EspnowMessage::OtaBegin {
                 total_size: *total_size,
                 sha256: *sha256,
+                ack_interval: *ack_interval,
             },
         },
         PcCommand::OtaData { target, seq, data } => RouteAction::SendTo {

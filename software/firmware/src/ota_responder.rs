@@ -9,13 +9,12 @@ use embedded_storage::Storage;
 use esp_radio::esp_now::EspNowSender;
 use sha2::{Digest, Sha256};
 
-use beambench_protocol::{self as proto, EspnowMessage};
+use beambench_protocol::{self as proto, EspnowMessage, OTA_CHUNK_SIZE};
 use esp_bootloader_esp_idf::partitions;
 
 use crate::common::SharedFlash;
 
-/// Maximum OTA chunk size (must match protocol definition).
-const CHUNK_SIZE: u32 = 240;
+const CHUNK_SIZE: u32 = OTA_CHUNK_SIZE as u32;
 
 /// Active OTA session state.
 struct OtaSession {
@@ -27,6 +26,10 @@ struct OtaSession {
     expected_sha256: [u8; 32],
     /// Running SHA-256 hasher.
     hasher: Sha256,
+    /// How often to send OtaAck (every N chunks). 1 = every chunk.
+    ack_interval: u16,
+    /// Total number of expected chunks (for detecting the last chunk).
+    total_chunks: u16,
 }
 
 /// OTA responder state — `None` when idle, `Some` during an active update.
@@ -53,7 +56,8 @@ pub async fn handle_ota_message(
         EspnowMessage::OtaBegin {
             total_size,
             sha256,
-        } => handle_begin(ota, flash, *total_size, *sha256).await,
+            ack_interval,
+        } => handle_begin(ota, flash, *total_size, *sha256, *ack_interval).await,
 
         EspnowMessage::OtaData { seq, data } => handle_data(ota, flash, *seq, data).await,
 
@@ -111,8 +115,14 @@ async fn handle_begin(
     flash: &SharedFlash,
     total_size: u32,
     sha256: [u8; 32],
+    ack_interval: u16,
 ) -> Option<EspnowMessage> {
-    info!("OTA begin: {} bytes", total_size);
+    let total_chunks = ((total_size + CHUNK_SIZE - 1) / CHUNK_SIZE) as u16;
+    let ack_interval = ack_interval.max(1); // Ensure at least 1.
+    info!(
+        "OTA begin: {} bytes, {} chunks, ack every {} chunks",
+        total_size, total_chunks, ack_interval
+    );
 
     let mut f = flash.lock().await;
 
@@ -183,6 +193,8 @@ async fn handle_begin(
         partition_size: target_size,
         expected_sha256: sha256,
         hasher: Sha256::new(),
+        ack_interval,
+        total_chunks,
     });
 
     Some(EspnowMessage::OtaReady)
@@ -225,7 +237,15 @@ async fn handle_data(
         return Some(ota_error("flash write failed"));
     }
 
-    Some(EspnowMessage::OtaAck { seq })
+    // Windowed ack: only ack on interval boundaries and the last chunk.
+    let chunk_num = seq + 1; // 1-based count
+    let is_last = chunk_num >= session.total_chunks;
+    let is_interval = chunk_num % session.ack_interval == 0;
+    if is_interval || is_last {
+        Some(EspnowMessage::OtaAck { seq })
+    } else {
+        None
+    }
 }
 
 // ── OtaFinish ───────────────────────────────────────────────────────────────

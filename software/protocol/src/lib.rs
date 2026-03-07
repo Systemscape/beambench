@@ -16,6 +16,10 @@ pub mod tx_logic;
 use heapless::{String, Vec};
 use serde::{Deserialize, Serialize};
 
+/// Maximum payload per OTA chunk. Must fit in a 250-byte ESP-NOW frame after
+/// postcard serialization overhead (tag byte + seq u16 + length varint).
+pub const OTA_CHUNK_SIZE: usize = 240;
+
 // ── Board roles (used during ESPNOW discovery) ──────────────────────────────
 
 /// Role a board advertises during ESPNOW discovery.
@@ -160,12 +164,16 @@ pub enum EspnowMessage {
 
     // OTA firmware update (Bridge ↔ field device)
     /// Bridge -> target: begin OTA update with expected size and hash.
-    OtaBegin { total_size: u32, sha256: [u8; 32] },
+    /// `ack_interval` controls windowed flow control: the target sends an
+    /// `OtaAck` every `ack_interval` chunks (and always on the last chunk).
+    /// A value of 1 means every chunk is acked (stop-and-wait).
+    OtaBegin { total_size: u32, sha256: [u8; 32], ack_interval: u16 },
     /// Target -> Bridge: ready to receive OTA data.
     OtaReady,
     /// Bridge -> target: firmware chunk (max 240 bytes to fit ESP-NOW payload).
     OtaData { seq: u16, data: Vec<u8, 240> },
-    /// Target -> Bridge: acknowledge receipt of chunk.
+    /// Target -> Bridge: acknowledge receipt of chunk. The PC should not send
+    /// more than `ack_interval` chunks beyond the last acked sequence number.
     OtaAck { seq: u16 },
     /// Bridge -> target: all chunks sent.
     OtaFinish,
@@ -206,8 +214,8 @@ pub enum PcCommand {
     QueryStatus,
 
     // OTA firmware update (PC -> Bridge -> target)
-    /// Begin OTA: target role, firmware size, and SHA-256 hash.
-    OtaBegin { target: Role, total_size: u32, sha256: [u8; 32] },
+    /// Begin OTA: target role, firmware size, SHA-256 hash, and ack window.
+    OtaBegin { target: Role, total_size: u32, sha256: [u8; 32], ack_interval: u16 },
     /// Stream a firmware chunk (Bridge relays to target via ESP-NOW).
     OtaData { target: Role, seq: u16, data: Vec<u8, 240> },
     /// All chunks sent — target should verify and apply.
@@ -675,6 +683,7 @@ mod test {
             &EspnowMessage::OtaBegin {
                 total_size: 0x40000,
                 sha256: [0xAB; 32],
+                ack_interval: 16,
             },
             &mut buf,
         );
@@ -710,6 +719,7 @@ mod test {
                 target: Role::Rx,
                 total_size: 0x40000,
                 sha256: [0xCD; 32],
+                ack_interval: 16,
             },
             &mut buf,
         );
@@ -922,6 +932,7 @@ mod test {
                 target: Role::Rx,
                 total_size: 0x40000,
                 sha256: [0xAB; 32],
+                ack_interval: 16,
             });
             assert_eq!(
                 action,
@@ -930,6 +941,7 @@ mod test {
                     msg: EspnowMessage::OtaBegin {
                         total_size: 0x40000,
                         sha256: [0xAB; 32],
+                        ack_interval: 16,
                     },
                 }
             );

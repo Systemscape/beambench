@@ -122,6 +122,35 @@ impl AppState {
     }
 }
 
+/// Spawn the OTA streaming task. Assumes `ota_in_progress` is already set.
+fn spawn_ota(
+    state: Arc<AppState>,
+    firmware: Vec<u8>,
+    role: beambench_protocol::Role,
+    ack_interval: u16,
+    serial_tx: SerialTx,
+    serial_rx: SerialRx,
+) {
+    tokio::spawn(async move {
+        match beambench_pc::ota::stream_firmware(
+            &firmware, role, ack_interval, &serial_tx, &serial_rx, &state.ws_tx,
+        )
+        .await
+        {
+            Ok(()) => {
+                let _ = state.ws_tx.send(WsEvent::OtaFinished);
+                let _ = state.ws_tx.send(WsEvent::Log {
+                    message: "OTA complete — device will reboot".to_string(),
+                });
+            }
+            Err(e) => {
+                state.broadcast_error(&format!("OTA failed: {e}"), &e);
+            }
+        }
+        state.ota_in_progress.store(false, Ordering::SeqCst);
+    });
+}
+
 /// Send a command and wait for a matching response, with timeout.
 /// Returns `Ok(event)` on match, `Err(description)` on protocol error or timeout.
 async fn send_and_wait_move(
@@ -239,6 +268,7 @@ async fn ota_upload(
 ) -> impl IntoResponse {
     let mut target: Option<String> = None;
     let mut firmware: Option<Vec<u8>> = None;
+    let mut ack_interval: Option<u16> = None;
 
     while let Ok(Some(field)) = multipart.next_field().await {
         match field.name() {
@@ -248,9 +278,14 @@ async fn ota_upload(
             Some("file") => {
                 firmware = field.bytes().await.ok().map(|b| b.to_vec());
             }
+            Some("ack_interval") => {
+                ack_interval = field.text().await.ok().and_then(|s| s.parse().ok());
+            }
             _ => {}
         }
     }
+
+    let ack_interval = ack_interval.unwrap_or(beambench_pc::ota::DEFAULT_ACK_INTERVAL);
 
     let Some(target_str) = target else {
         return Json(serde_json::json!({"error": "Missing 'target' field"}));
@@ -279,23 +314,7 @@ async fn ota_upload(
         message: format!("Starting OTA for {}: {} bytes", target_str, size),
     });
 
-    let state = state.clone();
-    tokio::spawn(async move {
-        match beambench_pc::ota::stream_firmware(&firmware, role, &serial_tx, &serial_rx, &state.ws_tx)
-            .await
-        {
-            Ok(()) => {
-                let _ = state.ws_tx.send(WsEvent::OtaFinished);
-                let _ = state.ws_tx.send(WsEvent::Log {
-                    message: "OTA complete — device will reboot".to_string(),
-                });
-            }
-            Err(e) => {
-                state.broadcast_error(&format!("OTA failed: {}", e), &e);
-            }
-        }
-        state.ota_in_progress.store(false, Ordering::SeqCst);
-    });
+    spawn_ota(state.clone(), firmware, role, ack_interval, serial_tx, serial_rx);
 
     Json(serde_json::json!({"ok": true, "size": size}))
 }
@@ -671,25 +690,14 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
                     ),
                 });
 
-                let state = state.clone();
-                tokio::spawn(async move {
-                    match beambench_pc::ota::stream_firmware(
-                        &firmware, role, &serial_tx, &serial_rx, &state.ws_tx,
-                    )
-                    .await
-                    {
-                        Ok(()) => {
-                            let _ = state.ws_tx.send(WsEvent::OtaFinished);
-                            let _ = state.ws_tx.send(WsEvent::Log {
-                                message: "OTA complete — device will reboot".to_string(),
-                            });
-                        }
-                        Err(e) => {
-                            state.broadcast_error(&format!("OTA failed: {}", e), &e);
-                        }
-                    }
-                    state.ota_in_progress.store(false, Ordering::SeqCst);
-                });
+                spawn_ota(
+                    state.clone(),
+                    firmware,
+                    role,
+                    beambench_pc::ota::DEFAULT_ACK_INTERVAL,
+                    serial_tx,
+                    serial_rx,
+                );
             } else {
                 state.ota_in_progress.store(false, Ordering::SeqCst);
                 state.broadcast_error(
