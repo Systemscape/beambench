@@ -624,14 +624,16 @@
             onpointerdown={(e) => startResize(e, 'x', () => sidebarWidth, (v) => { sidebarWidth = v; }, 200, 500)}
         ></div>
 
-        <div class="main-area">
-            <div class="plot" bind:this={plotDiv}></div>
+        <div class="main-area" style="grid-template-rows: 1fr 6px {logHeight}px">
+            <div class="plot-wrapper">
+                <div bind:this={plotDiv} style="width:100%;height:100%"></div>
+            </div>
             <!-- svelte-ignore a11y_no_static_element_interactions -->
             <div
                 class="resize-handle-v"
                 onpointerdown={(e) => startResize(e, 'y', () => logHeight, (v) => { logHeight = v; }, 60, 600, true)}
             ></div>
-            <section class="log-section" style="height: {logHeight}px">
+            <section class="log-section">
                 <h2>Log</h2>
                 <div class="log" bind:this={logDiv}>
                     {#each logEntries as entry, i (i)}
@@ -855,26 +857,24 @@
 
     .main-area {
         flex: 1;
-        display: flex;
-        flex-direction: column;
+        display: grid;
         min-width: 0;
         overflow: hidden;
         padding-left: 0.75rem;
     }
 
-    .plot {
-        flex: 1;
-        min-height: 200px;
+    .plot-wrapper {
+        min-height: 0;
+        min-width: 0;
+        overflow: hidden;
         background: #1a1a1a;
         border: 1.5px solid #3a3a3a;
         border-radius: 6px;
     }
 
     .resize-handle-v {
-        height: 6px;
         cursor: row-resize;
         background: transparent;
-        flex-shrink: 0;
     }
 
     .resize-handle-v:hover,
@@ -890,12 +890,13 @@
     .log-section {
         display: flex;
         flex-direction: column;
-        flex: none;
+        overflow: hidden;
     }
 
     .log {
         flex: 1;
         overflow-y: auto;
+        min-height: 0;
         font-family: monospace;
         font-size: 0.75rem;
         line-height: 1.5;
