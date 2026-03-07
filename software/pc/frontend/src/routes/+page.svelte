@@ -188,6 +188,7 @@
         // Track reactive deps to re-render plot
         void dynamicRangeDb;
         void sidebarWidth;
+        void logHeight;
         void measurements.map((m) => m.visible);
         updatePlot();
     });
@@ -624,7 +625,7 @@
         ></div>
 
         <div class="main-area">
-            <div class="plot" bind:this={plotDiv}></div>
+            <div class="plot" style="height: calc(100% - {logHeight + 6}px)" bind:this={plotDiv}></div>
             <!-- svelte-ignore a11y_no_static_element_interactions -->
             <div
                 class="resize-handle-v"
@@ -861,7 +862,6 @@
     }
 
     .plot {
-        flex: 1;
         min-height: 200px;
         background: #1a1a1a;
         border: 1px solid #2a2a2a;
