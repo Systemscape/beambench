@@ -144,10 +144,8 @@
                 addLog(`Turntable at ${event.angle_deg.toFixed(1)}°`);
                 break;
             case 'OtaProgress': {
-                const pct = Math.round(event.chunks_sent / event.total_chunks * 100);
-                if (pct % 10 === 0 || event.chunks_sent === event.total_chunks) {
-                    addLog(`OTA progress: ${pct}% (${event.chunks_sent}/${event.total_chunks} chunks)`);
-                }
+                const pct = Math.floor(event.chunks_sent / event.total_chunks * 100);
+                addLog(`OTA progress: ${pct}% (${event.chunks_sent}/${event.total_chunks} chunks)`);
                 break;
             }
             case 'OtaFinished':
