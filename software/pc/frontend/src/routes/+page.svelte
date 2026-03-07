@@ -62,6 +62,10 @@
     let homing = $state(false);
     let jogging = $state(false);
 
+    // Resizable panels
+    let sidebarWidth = $state(300);
+    let logHeight = $state(200);
+
     // Turntable position (tracked from JogComplete / HomeComplete)
     let turntableAngle = $state(0);
 
@@ -183,6 +187,7 @@
     $effect(() => {
         // Track reactive deps to re-render plot
         void dynamicRangeDb;
+        void sidebarWidth;
         void measurements.map((m) => m.visible);
         updatePlot();
     });
@@ -352,6 +357,33 @@
         updatePlot();
     }
 
+    function startResize(
+        e: PointerEvent,
+        axis: 'x' | 'y',
+        getter: () => number,
+        setter: (v: number) => void,
+        min: number,
+        max: number,
+        invert = false,
+    ) {
+        e.preventDefault();
+        const target = e.currentTarget as HTMLElement;
+        target.setPointerCapture(e.pointerId);
+        const startPos = axis === 'x' ? e.clientX : e.clientY;
+        const startVal = getter();
+
+        function onMove(ev: PointerEvent) {
+            const delta = (axis === 'x' ? ev.clientX : ev.clientY) - startPos;
+            setter(Math.min(max, Math.max(min, startVal + (invert ? -delta : delta))));
+        }
+        function onUp() {
+            target.removeEventListener('pointermove', onMove);
+            target.removeEventListener('pointerup', onUp);
+        }
+        target.addEventListener('pointermove', onMove);
+        target.addEventListener('pointerup', onUp);
+    }
+
     onMount(async () => {
         Plotly = await import('plotly.js-dist-min');
         updatePlot();
@@ -382,7 +414,7 @@
     {/if}
 
     <div class="layout">
-        <div class="sidebar">
+        <div class="sidebar" style="width: {sidebarWidth}px">
             <section>
                 <h2>Connection</h2>
                 {#if ports.length > 0}
@@ -585,9 +617,20 @@
 
         </div>
 
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div
+            class="resize-handle-h"
+            onpointerdown={(e) => startResize(e, 'x', () => sidebarWidth, (v) => { sidebarWidth = v; }, 200, 500)}
+        ></div>
+
         <div class="main-area">
             <div class="plot" bind:this={plotDiv}></div>
-            <section class="log-section">
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <div
+                class="resize-handle-v"
+                onpointerdown={(e) => startResize(e, 'y', () => logHeight, (v) => { logHeight = v; }, 60, 600, true)}
+            ></div>
+            <section class="log-section" style="height: {logHeight}px">
                 <h2>Log</h2>
                 <div class="log" bind:this={logDiv}>
                     {#each logEntries as entry, i (i)}
@@ -654,17 +697,31 @@
 
     .layout {
         display: flex;
-        gap: 1.5rem;
+        gap: 0;
         height: calc(100vh - 6rem);
     }
 
     .sidebar {
-        width: 300px;
         flex-shrink: 0;
         display: flex;
         flex-direction: column;
         gap: 1rem;
         overflow-y: auto;
+        padding-right: 0.75rem;
+    }
+
+    .resize-handle-h {
+        width: 6px;
+        cursor: col-resize;
+        background: transparent;
+        flex-shrink: 0;
+        position: relative;
+    }
+
+    .resize-handle-h:hover,
+    .resize-handle-h:active {
+        background: #444;
+        border-radius: 3px;
     }
 
     .sweep-grid {
@@ -799,16 +856,29 @@
         flex: 1;
         display: flex;
         flex-direction: column;
-        gap: 1rem;
         min-width: 0;
+        padding-left: 0.75rem;
     }
 
     .plot {
         flex: 1;
-        min-height: 400px;
+        min-height: 200px;
         background: #1a1a1a;
         border: 1px solid #2a2a2a;
         border-radius: 6px;
+    }
+
+    .resize-handle-v {
+        height: 6px;
+        cursor: row-resize;
+        background: transparent;
+        flex-shrink: 0;
+    }
+
+    .resize-handle-v:hover,
+    .resize-handle-v:active {
+        background: #444;
+        border-radius: 3px;
     }
 
     a {
@@ -818,6 +888,7 @@
     .log-section {
         display: flex;
         flex-direction: column;
+        flex-shrink: 0;
         min-height: 0;
     }
 
@@ -828,8 +899,6 @@
         font-size: 0.75rem;
         line-height: 1.5;
         color: #999;
-        min-height: 120px;
-        max-height: 300px;
     }
 
     .log-entry {
