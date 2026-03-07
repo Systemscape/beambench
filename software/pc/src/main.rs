@@ -14,7 +14,7 @@ use axum::{
 };
 use clap::Parser;
 use rust_embed::Embed;
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::{Mutex, broadcast, watch};
 use tracing::info;
 
 use beambench_pc::{PortInfo, SystemStatus, WsCommand, WsEvent, export_csv};
@@ -30,6 +30,12 @@ const VERIFY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Timeout for turntable move commands (ReturnHome, Jog).
 const MOVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Interval between periodic status polls to the Bridge.
+const STATUS_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Timeout for a status poll response.
+const STATUS_POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 #[derive(Parser)]
 struct Args {
@@ -67,6 +73,8 @@ struct AppState {
     jogging: AtomicBool,
     /// Whether an OTA firmware update is in progress.
     ota_in_progress: AtomicBool,
+    /// Incremented on each connect/disconnect to cancel stale status pollers.
+    poll_generation: watch::Sender<u64>,
 }
 
 impl AppState {
@@ -160,6 +168,7 @@ async fn main() {
     let args = Args::parse();
 
     let (ws_tx, _) = broadcast::channel::<WsEvent>(256);
+    let (poll_gen_tx, _) = watch::channel(0u64);
 
     let state = Arc::new(AppState {
         ws_tx,
@@ -173,6 +182,7 @@ async fn main() {
         turntable_angle_cdeg: AtomicI32::new(0),
         jogging: AtomicBool::new(false),
         ota_in_progress: AtomicBool::new(false),
+        poll_generation: poll_gen_tx,
     });
 
     let api = Router::new()
@@ -391,8 +401,13 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
                     state.turntable_connected.store(false, Ordering::SeqCst);
                     state.broadcast_status().await;
 
+                    // Cancel any previous status poller and start a new generation.
+                    state.poll_generation.send_modify(|g| *g += 1);
+                    let generation = *state.poll_generation.borrow();
+                    let mut poll_cancel = state.poll_generation.subscribe();
+
                     // Probe the device: send QueryStatus and wait for a response.
-                    let state = state.clone();
+                    let state2 = state.clone();
                     let port_name = port.clone();
                     tokio::spawn(async move {
                         tokio::time::sleep(VERIFY_INITIAL_DELAY).await;
@@ -410,38 +425,42 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
                         match result {
                             Ok(Some(beambench_protocol::DeviceEvent::Status { tx_connected, rx_connected, turntable_connected })) => {
                                 tracing::info!("Device verified as Bridge");
-                                let _ = state.ws_tx.send(WsEvent::Log {
+                                let _ = state2.ws_tx.send(WsEvent::Log {
                                     message: format!("{} confirmed as Bridge (TX: {}, RX: {}, Turntable: {})",
                                         port_name,
                                         if tx_connected { "connected" } else { "not found" },
                                         if rx_connected { "connected" } else { "not found" },
                                         if turntable_connected { "connected" } else { "not found" }),
                                 });
-                                state.tx_connected.store(tx_connected, Ordering::SeqCst);
-                                state.rx_connected.store(rx_connected, Ordering::SeqCst);
-                                state.turntable_connected.store(turntable_connected, Ordering::SeqCst);
-                                state.broadcast_status().await;
+                                update_peer_status(&state2, tx_connected, rx_connected, turntable_connected);
+                                state2.broadcast_status().await;
                             }
                             Ok(Some(other)) => {
                                 tracing::info!("Unexpected response from device: {:?}", other);
-                                let _ = state.ws_tx.send(WsEvent::Log {
+                                let _ = state2.ws_tx.send(WsEvent::Log {
                                     message: format!("{}: got unexpected response — may not be Bridge", port_name),
                                 });
                             }
                             Ok(None) => {
                                 tracing::warn!("Serial channel closed during verification");
-                                let _ = state.ws_tx.send(WsEvent::Log {
+                                let _ = state2.ws_tx.send(WsEvent::Log {
                                     message: format!("{}: connection lost during verification", port_name),
                                 });
                             }
                             Err(_) => {
                                 tracing::warn!("No response from {} — not a Bridge or firmware not running", port_name);
-                                state.broadcast_error(
+                                state2.broadcast_error(
                                     &format!("{}: no response — is this the Bridge device?", port_name),
                                     "Device did not respond. Is this the Bridge?",
                                 );
                             }
                         }
+                    });
+
+                    // Spawn periodic status poller.
+                    let state3 = state.clone();
+                    tokio::spawn(async move {
+                        status_poll_loop(&state3, generation, &mut poll_cancel).await;
                     });
                 }
                 Err(e) => {
@@ -454,6 +473,8 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
             }
         }
         WsCommand::Disconnect => {
+            // Cancel the status poller for this connection.
+            state.poll_generation.send_modify(|g| *g += 1);
             {
                 let mut serial = state.serial.lock().await;
                 if let Some(handle) = serial.take() {
@@ -718,6 +739,82 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
             } else {
                 state.jogging.store(false, Ordering::SeqCst);
                 state.broadcast_error("Jog failed: not connected", "Not connected to serial/TCP");
+            }
+        }
+    }
+}
+
+/// Update peer connection atomics from a bridge Status response.
+fn update_peer_status(state: &AppState, tx: bool, rx: bool, turntable: bool) {
+    state.tx_connected.store(tx, Ordering::SeqCst);
+    state.rx_connected.store(rx, Ordering::SeqCst);
+    state.turntable_connected.store(turntable, Ordering::SeqCst);
+}
+
+/// Periodically poll the bridge for device connection status.
+///
+/// Stops when the poll generation changes (new connect or disconnect).
+/// Skips polls while an exclusive operation (sweep, OTA, homing, jogging)
+/// holds the serial_rx lock.
+async fn status_poll_loop(
+    state: &Arc<AppState>,
+    generation: u64,
+    cancel: &mut watch::Receiver<u64>,
+) {
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep(STATUS_POLL_INTERVAL) => {}
+            _ = cancel.changed() => return,
+        }
+
+        // Check if this poller is still current.
+        if *state.poll_generation.borrow() != generation {
+            return;
+        }
+
+        // Skip polling during exclusive operations — they hold serial_rx.
+        if state.sweeping.load(Ordering::SeqCst)
+            || state.ota_in_progress.load(Ordering::SeqCst)
+            || state.homing.load(Ordering::SeqCst)
+            || state.jogging.load(Ordering::SeqCst)
+        {
+            continue;
+        }
+
+        let Some((serial_tx, serial_rx)) = state.clone_serial().await else {
+            return; // Disconnected.
+        };
+
+        if serial_tx.send(beambench_protocol::PcCommand::QueryStatus).await.is_err() {
+            return;
+        }
+
+        let result = tokio::time::timeout(STATUS_POLL_TIMEOUT, async {
+            let mut rx = serial_rx.lock().await;
+            loop {
+                match rx.recv().await {
+                    Some(beambench_protocol::DeviceEvent::Status { tx_connected, rx_connected, turntable_connected }) => {
+                        return Some((tx_connected, rx_connected, turntable_connected));
+                    }
+                    Some(_) => continue,
+                    None => return None,
+                }
+            }
+        })
+        .await;
+
+        match result {
+            Ok(Some((tx, rx, turntable))) => {
+                update_peer_status(state, tx, rx, turntable);
+                state.broadcast_status().await;
+            }
+            Ok(None) => {
+                // Channel closed — serial disconnected.
+                return;
+            }
+            Err(_) => {
+                // Timeout — bridge may be busy or connection lost.
+                tracing::debug!("Status poll timed out");
             }
         }
     }

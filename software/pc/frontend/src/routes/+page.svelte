@@ -65,6 +65,9 @@
     // Turntable position (tracked from JogComplete / HomeComplete)
     let turntableAngle = $state(0);
 
+    // WebSocket connection state
+    let wsConnected = $state(false);
+
     // OTA state
     let otaInProgress = $state(false);
     let otaChunksSent = $state(0);
@@ -390,7 +393,11 @@
         Plotly = await import('plotly.js-dist-min');
         updatePlot();
 
-        ws = createWsConnection(handleEvent);
+        ws = createWsConnection(
+            handleEvent,
+            () => { wsConnected = true; },
+            () => { wsConnected = false; }
+        );
 
         await fetchPorts();
     });
@@ -402,6 +409,10 @@
 
 <main>
     <h1>Beambench</h1>
+
+    {#if !wsConnected}
+        <div class="ws-disconnected">Server connection lost — reconnecting&hellip;</div>
+    {/if}
 
     {#if errorMessage}
         <div class="error">{errorMessage}</div>
@@ -628,9 +639,14 @@
                         disabled={otaInProgress}
                         onchange={(e) => { otaFile = (e.target as HTMLInputElement).files?.[0] ?? null; }} />
                 </div>
-                {#if otaInProgress && otaTotalChunks > 0}
-                    <progress value={otaChunksSent} max={otaTotalChunks}></progress>
-                    <p class="info">{Math.round(otaChunksSent / otaTotalChunks * 100)}%</p>
+                {#if otaInProgress}
+                    {#if otaTotalChunks > 0}
+                        <progress value={otaChunksSent} max={otaTotalChunks}></progress>
+                        <p class="info">{Math.round(otaChunksSent / otaTotalChunks * 100)}%
+                            ({otaChunksSent}/{otaTotalChunks} chunks)</p>
+                    {:else}
+                        <p class="info">Waiting for device&hellip;</p>
+                    {/if}
                 {/if}
                 <div class="button-row">
                     <button
@@ -689,6 +705,16 @@
         color: #888;
         text-transform: uppercase;
         letter-spacing: 0.08em;
+    }
+
+    .ws-disconnected {
+        background: #e65100;
+        color: white;
+        padding: 0.5rem 1rem;
+        border-radius: 4px;
+        margin-bottom: 0.5rem;
+        font-size: 0.85rem;
+        text-align: center;
     }
 
     .error {

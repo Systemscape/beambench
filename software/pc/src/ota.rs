@@ -13,8 +13,9 @@ use crate::WsEvent;
 
 const OTA_CHUNK_SIZE: usize = 240;
 const OTA_BEGIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-const OTA_CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const OTA_CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 const OTA_FINISH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const OTA_CHUNK_RETRIES: usize = 3;
 
 /// Parse a role string into a protocol `Role`.
 pub fn parse_role(s: &str) -> Option<Role> {
@@ -82,16 +83,45 @@ pub async fn stream_firmware(
         data.extend_from_slice(chunk)
             .map_err(|_| "Chunk exceeds 240 bytes".to_string())?;
 
-        serial_tx
-            .send(PcCommand::OtaData { target, seq, data })
-            .await
-            .map_err(|_| "Serial connection lost".to_string())?;
+        // Retry loop: resend the chunk if ack times out.
+        let mut last_err = String::new();
+        let mut acked = false;
+        for attempt in 0..=OTA_CHUNK_RETRIES {
+            if attempt > 0 {
+                let _ = ws_tx.send(WsEvent::Log {
+                    message: format!("Retrying chunk {}/{} (attempt {})", seq + 1, total_chunks, attempt + 1),
+                });
+            }
 
-        wait_for(&mut rx, OTA_CHUNK_TIMEOUT, |e| {
-            matches!(e, DeviceEvent::OtaAck { seq: s } if *s == seq)
-        })
-        .await
-        .map_err(|e| format!("Chunk {}/{}: {}", seq + 1, total_chunks, e))?;
+            serial_tx
+                .send(PcCommand::OtaData { target, seq, data: data.clone() })
+                .await
+                .map_err(|_| "Serial connection lost".to_string())?;
+
+            match wait_for(&mut rx, OTA_CHUNK_TIMEOUT, |e| {
+                matches!(e, DeviceEvent::OtaAck { seq: s } if *s == seq)
+            })
+            .await
+            {
+                Ok(()) => {
+                    acked = true;
+                    break;
+                }
+                Err(e) if e == "Timeout" && attempt < OTA_CHUNK_RETRIES => {
+                    last_err = e;
+                    continue;
+                }
+                Err(e) => {
+                    return Err(format!("Chunk {}/{}: {}", seq + 1, total_chunks, e));
+                }
+            }
+        }
+        if !acked {
+            return Err(format!(
+                "Chunk {}/{}: {} (after {} retries)",
+                seq + 1, total_chunks, last_err, OTA_CHUNK_RETRIES
+            ));
+        }
 
         // Progress update every ~1% + on the last chunk.
         let progress_interval = (total_chunks / 100).max(1);
