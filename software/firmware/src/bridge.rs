@@ -160,7 +160,7 @@ async fn bridge_serial_rx_task(
     event_tx: Sender<'static, NoopRawMutex, DeviceEvent, 8>,
     led_signal: &'static Signal<NoopRawMutex, LedState>,
 ) {
-    let mut raw_buf = [0u8; 64];
+    let mut raw_buf = [0u8; 512];
     let mut accum: heapless::Vec<u8, COBS_BUF_SIZE> = heapless::Vec::new();
 
     loop {

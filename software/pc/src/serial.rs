@@ -35,7 +35,7 @@ impl SerialHandle {
         let port = tokio_serial::new(port_name, BAUD_RATE).open_native_async()?;
         let (reader, writer) = tokio::io::split(port);
 
-        let (cmd_tx, cmd_rx) = mpsc::channel::<PcCommand>(32);
+        let (cmd_tx, cmd_rx) = mpsc::channel::<PcCommand>(128);
         let (resp_tx, resp_rx) = mpsc::channel::<DeviceEvent>(64);
         let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
 
@@ -56,7 +56,7 @@ impl SerialHandle {
         let stream = tokio::net::TcpStream::connect(addr).await?;
         let (reader, writer) = tokio::io::split(stream);
 
-        let (cmd_tx, cmd_rx) = mpsc::channel::<PcCommand>(32);
+        let (cmd_tx, cmd_rx) = mpsc::channel::<PcCommand>(128);
         let (resp_tx, resp_rx) = mpsc::channel::<DeviceEvent>(64);
         let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
 

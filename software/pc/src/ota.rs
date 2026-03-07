@@ -91,7 +91,7 @@ const OTA_FINISH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3
 /// Default ack interval (chunks per ack). Higher values increase throughput
 /// by reducing round-trip overhead, but require the target to buffer more
 /// data before acknowledging. 16 chunks × 240 bytes = 3,840 bytes per window.
-pub const DEFAULT_ACK_INTERVAL: u16 = 16;
+pub const DEFAULT_ACK_INTERVAL: u16 = 64;
 
 /// Parse a role string into a protocol `Role`.
 pub fn parse_role(s: &str) -> Option<Role> {

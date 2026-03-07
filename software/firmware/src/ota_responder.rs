@@ -5,7 +5,7 @@
 
 use defmt::info;
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, mutex::Mutex, signal::Signal};
-use embedded_storage::Storage;
+use embedded_storage::nor_flash::NorFlash;
 use esp_radio::esp_now::EspNowSender;
 use sha2::{Digest, Sha256};
 
@@ -195,6 +195,16 @@ async fn handle_begin(
         target_size
     );
 
+    // Pre-erase the needed flash region. This is much faster than per-write
+    // auto-erase and ensures the region is ready for direct NorFlash::write.
+    let erase_end = (target_offset + total_size + 4095) & !4095; // round up to 4KB sector
+    info!("Erasing flash 0x{:X}..0x{:X}", target_offset, erase_end);
+    if let Err(e) = f.erase(target_offset, erase_end) {
+        defmt::error!("Flash erase failed: {:?}", defmt::Debug2Format(&e));
+        return Some(ota_error("flash erase failed"));
+    }
+    info!("Erase complete");
+
     // Drop flash lock before storing session state.
     drop(f);
 
@@ -239,9 +249,9 @@ async fn handle_data(
     // Update hash with the chunk data.
     session.hasher.update(data.as_slice());
 
-    // Write to flash.
+    // Write to flash (pre-erased in handle_begin, so use NorFlash::write directly).
     let mut f = flash.lock().await;
-    if let Err(e) = f.write(flash_addr, data.as_slice()) {
+    if let Err(e) = NorFlash::write(&mut *f, flash_addr, data.as_slice()) {
         defmt::error!("Flash write failed at 0x{:X}: {:?}", flash_addr, defmt::Debug2Format(&e));
         drop(f);
         state.session = None;
