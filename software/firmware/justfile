@@ -16,8 +16,8 @@ flash-rx:
 flash-tx:
     cargo run --release --features role-tx
 
-flash-stepper:
-    cargo run --release --features role-stepper
+flash-turntable:
+    cargo run --release --features role-turntable
 
 flash-bridge:
     cargo run --release --features role-bridge

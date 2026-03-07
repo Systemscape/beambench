@@ -1,4 +1,4 @@
-//! Stepper/Turntable role — motor controller receiving commands via ESPNOW.
+//! Turntable role — motor controller receiving commands via ESPNOW.
 
 use defmt::info;
 use embassy_executor::Spawner;
@@ -9,7 +9,7 @@ use esp_radio::esp_now::{
 };
 
 use beambench_protocol::{self as proto, EspnowMessage, Role};
-use beambench_protocol::stepper::{degrees_to_steps, steps_to_degrees};
+use beambench_protocol::turntable::{degrees_to_steps, steps_to_degrees};
 
 use crate::common::*;
 use crate::mk_static;
@@ -52,13 +52,13 @@ pub async fn run(
     );
 
     spawner
-        .spawn(stepper_discovery_task(sender, bridge_mac, last_bridge_seen, manager, led_signal))
+        .spawn(turntable_discovery_task(sender, bridge_mac, last_bridge_seen, manager, led_signal))
         .ok();
     spawner
-        .spawn(stepper_listener_task(manager, sender, receiver, bridge_mac, last_bridge_seen, motor_cmd, flash, ota))
+        .spawn(turntable_listener_task(manager, sender, receiver, bridge_mac, last_bridge_seen, motor_cmd, flash, ota))
         .ok();
     spawner
-        .spawn(stepper_responder_task(sender, bridge_mac, motor_result))
+        .spawn(turntable_responder_task(sender, bridge_mac, motor_result))
         .ok();
     spawner
         .spawn(motor_task_step_dir(motor, motor_cmd, motor_result, led_signal))
@@ -72,7 +72,7 @@ pub async fn run(
 }
 
 #[embassy_executor::task]
-async fn stepper_discovery_task(
+async fn turntable_discovery_task(
     sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
     bridge_mac: &'static Mutex<NoopRawMutex, Option<[u8; 6]>>,
     last_bridge_seen: &'static Mutex<NoopRawMutex, Option<Instant>>,
@@ -115,7 +115,7 @@ async fn stepper_discovery_task(
 }
 
 #[embassy_executor::task]
-async fn stepper_listener_task(
+async fn turntable_listener_task(
     manager: &'static EspNowManager<'static>,
     sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
     mut receiver: EspNowReceiver<'static>,
@@ -180,7 +180,7 @@ async fn stepper_listener_task(
 }
 
 #[embassy_executor::task]
-async fn stepper_responder_task(
+async fn turntable_responder_task(
     sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
     bridge_mac: &'static Mutex<NoopRawMutex, Option<[u8; 6]>>,
     result_signal: &'static Signal<NoopRawMutex, MotorResult>,

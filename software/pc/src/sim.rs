@@ -47,7 +47,7 @@ pub async fn handle_connection(stream: tokio::net::TcpStream) {
                     .send(DeviceEvent::MoveComplete { angle_deg })
                     .await;
             }
-            PcCommand::StopStepper => {
+            PcCommand::StopTurntable => {
                 let _ = resp_tx
                     .send(DeviceEvent::MoveComplete {
                         angle_deg: current_angle,
@@ -88,7 +88,7 @@ pub async fn handle_connection(stream: tokio::net::TcpStream) {
                     .send(DeviceEvent::Status {
                         tx_connected: true,
                         rx_connected: true,
-                        stepper_connected: true,
+                        turntable_connected: true,
                     })
                     .await;
             }

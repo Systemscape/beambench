@@ -123,7 +123,7 @@ async fn wait_for_move_complete(
         loop {
             match rx.recv().await {
                 Some(DeviceEvent::MoveComplete { angle_deg }) => return Ok(angle_deg),
-                Some(DeviceEvent::StepperError { description }) => {
+                Some(DeviceEvent::TurntableError { description }) => {
                     return Err(description.to_string());
                 }
                 Some(DeviceEvent::Error { description }) => {
@@ -277,7 +277,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sweep_handles_stepper_error() {
+    async fn sweep_handles_turntable_error() {
         let (serial_tx, mut serial_cmd_rx) = mpsc::channel::<PcCommand>(32);
         let (resp_tx, resp_rx) = mpsc::channel::<DeviceEvent>(64);
         let (ws_tx, mut ws_rx) = broadcast::channel::<WsEvent>(64);
@@ -296,7 +296,7 @@ mod tests {
                     }
                     PcCommand::MoveTo { .. } => {
                         resp_tx
-                            .send(DeviceEvent::StepperError {
+                            .send(DeviceEvent::TurntableError {
                                 description: heapless::String::try_from("motor fault").unwrap(),
                             })
                             .await

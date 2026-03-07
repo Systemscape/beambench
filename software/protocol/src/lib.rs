@@ -193,9 +193,9 @@ pub enum PcCommand {
     StartTransmitting,
     StopTransmitting,
 
-    // Stepper control
+    // Turntable control
     MoveTo { angle_deg: f32 },
-    StopStepper,
+    StopTurntable,
     ReturnHome,
 
     // RX control
@@ -221,9 +221,9 @@ pub enum DeviceEvent {
     // TX responses
     TxAck,
 
-    // Stepper responses
+    // Turntable responses
     MoveComplete { angle_deg: f32 },
-    StepperError { description: String<64> },
+    TurntableError { description: String<64> },
     HomeComplete,
 
     // RX responses
@@ -233,7 +233,7 @@ pub enum DeviceEvent {
     Status {
         tx_connected: bool,
         rx_connected: bool,
-        stepper_connected: bool,
+        turntable_connected: bool,
     },
     Error { description: String<128> },
 
@@ -309,18 +309,18 @@ pub enum RxToPc {
     },
 }
 
-// ── Stepper angle conversion (pure math, testable on host) ──────────────────
+// ── Turntable angle conversion (pure math, testable on host) ─────────────────
 
-pub mod stepper {
+pub mod turntable {
     /// Steps per revolution: 200 full steps × 16 microsteps.
     pub const STEPS_PER_REV: f32 = 200.0 * 16.0;
 
-    /// Convert an angle in degrees to stepper motor steps.
+    /// Convert an angle in degrees to motor steps.
     pub fn degrees_to_steps(angle_deg: f32) -> i32 {
         (angle_deg / 360.0 * STEPS_PER_REV) as i32
     }
 
-    /// Convert stepper motor steps to an angle in degrees.
+    /// Convert motor steps to an angle in degrees.
     pub fn steps_to_degrees(steps: i32) -> f32 {
         (steps as f32) / STEPS_PER_REV * 360.0
     }
@@ -604,7 +604,7 @@ mod test {
         test_cobs_round_trip(&PcCommand::StartTransmitting, &mut buf);
         test_cobs_round_trip(&PcCommand::StopTransmitting, &mut buf);
         test_cobs_round_trip(&PcCommand::MoveTo { angle_deg: 45.0 }, &mut buf);
-        test_cobs_round_trip(&PcCommand::StopStepper, &mut buf);
+        test_cobs_round_trip(&PcCommand::StopTurntable, &mut buf);
         test_cobs_round_trip(&PcCommand::ReturnHome, &mut buf);
         test_cobs_round_trip(&PcCommand::StartMeasurement, &mut buf);
         test_cobs_round_trip(&PcCommand::ReportMeasurement, &mut buf);
@@ -621,7 +621,7 @@ mod test {
             &mut buf,
         );
         test_cobs_round_trip(
-            &DeviceEvent::StepperError {
+            &DeviceEvent::TurntableError {
                 description: String::try_from("stall").unwrap(),
             },
             &mut buf,
@@ -638,7 +638,7 @@ mod test {
             &DeviceEvent::Status {
                 tx_connected: true,
                 rx_connected: true,
-                stepper_connected: false,
+                turntable_connected: false,
             },
             &mut buf,
         );
@@ -805,8 +805,8 @@ mod test {
         }
 
         #[test]
-        fn stop_stepper_routes_to_turntable() {
-            let action = route_command(&PcCommand::StopStepper);
+        fn stop_turntable_routes_to_turntable() {
+            let action = route_command(&PcCommand::StopTurntable);
             assert_eq!(
                 action,
                 RouteAction::SendTo {
@@ -874,7 +874,7 @@ mod test {
             });
             assert_eq!(
                 translate_response(&msg),
-                Some(DeviceEvent::StepperError {
+                Some(DeviceEvent::TurntableError {
                     description: String::try_from("stall").unwrap(),
                 })
             );
@@ -1210,7 +1210,7 @@ mod test {
             let event = translate_response(&resp.unwrap()).unwrap();
             assert_eq!(event, DeviceEvent::TxAck);
 
-            // 2. PC -> Bridge -> Stepper: MoveTo 90°
+            // 2. PC -> Bridge -> Turntable: MoveTo 90°
             let msg = route_expect(&PcCommand::MoveTo { angle_deg: 90.0 }, Role::Turntable);
             assert_eq!(
                 msg,
@@ -1270,10 +1270,10 @@ mod test {
         }
     }
 
-    // ── Stepper angle conversion tests ──────────────────────────────────────
+    // ── Turntable angle conversion tests ─────────────────────────────────────
 
-    mod stepper_tests {
-        use crate::stepper::*;
+    mod turntable_tests {
+        use crate::turntable::*;
 
         #[test]
         fn zero_degrees_is_zero_steps() {

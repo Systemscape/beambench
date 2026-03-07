@@ -21,7 +21,7 @@ pub fn parse_role(s: &str) -> Option<Role> {
     match s.to_lowercase().as_str() {
         "rx" => Some(Role::Rx),
         "tx" => Some(Role::Tx),
-        "turntable" | "stepper" => Some(Role::Turntable),
+        "turntable" => Some(Role::Turntable),
         "bridge" => Some(Role::Bridge),
         _ => None,
     }

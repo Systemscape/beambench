@@ -133,7 +133,7 @@ async fn send_and_wait_move(
                 Some(beambench_protocol::DeviceEvent::HomeComplete) => {
                     return Ok(0.0);
                 }
-                Some(beambench_protocol::DeviceEvent::StepperError { description }) => {
+                Some(beambench_protocol::DeviceEvent::TurntableError { description }) => {
                     return Err(description.to_string());
                 }
                 Some(beambench_protocol::DeviceEvent::Error { description }) => {
@@ -408,18 +408,18 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
                         .await;
 
                         match result {
-                            Ok(Some(beambench_protocol::DeviceEvent::Status { tx_connected, rx_connected, stepper_connected })) => {
+                            Ok(Some(beambench_protocol::DeviceEvent::Status { tx_connected, rx_connected, turntable_connected })) => {
                                 tracing::info!("Device verified as Bridge");
                                 let _ = state.ws_tx.send(WsEvent::Log {
-                                    message: format!("{} confirmed as Bridge (TX: {}, RX: {}, Stepper: {})",
+                                    message: format!("{} confirmed as Bridge (TX: {}, RX: {}, Turntable: {})",
                                         port_name,
                                         if tx_connected { "connected" } else { "not found" },
                                         if rx_connected { "connected" } else { "not found" },
-                                        if stepper_connected { "connected" } else { "not found" }),
+                                        if turntable_connected { "connected" } else { "not found" }),
                                 });
                                 state.tx_connected.store(tx_connected, Ordering::SeqCst);
                                 state.rx_connected.store(rx_connected, Ordering::SeqCst);
-                                state.turntable_connected.store(stepper_connected, Ordering::SeqCst);
+                                state.turntable_connected.store(turntable_connected, Ordering::SeqCst);
                                 state.broadcast_status().await;
                             }
                             Ok(Some(other)) => {
@@ -537,7 +537,7 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
             let serial = state.serial.lock().await;
             if let Some(ref handle) = *serial {
                 let _ = handle.tx.send(beambench_protocol::PcCommand::StopTransmitting).await;
-                let _ = handle.tx.send(beambench_protocol::PcCommand::StopStepper).await;
+                let _ = handle.tx.send(beambench_protocol::PcCommand::StopTurntable).await;
             }
         }
         WsCommand::ConfigureTx(tx_config) => {

@@ -50,7 +50,7 @@ pub fn route_command(cmd: &PcCommand) -> RouteAction {
                 angle_deg: *angle_deg,
             }),
         },
-        PcCommand::StopStepper => RouteAction::SendTo {
+        PcCommand::StopTurntable => RouteAction::SendTo {
             role: Role::Turntable,
             msg: EspnowMessage::TurntableCmd(TurntableCommand::Stop),
         },
@@ -104,7 +104,7 @@ pub fn translate_response(msg: &EspnowMessage) -> Option<DeviceEvent> {
             TurntableResponse::MoveComplete { angle_deg } => DeviceEvent::MoveComplete {
                 angle_deg: *angle_deg,
             },
-            TurntableResponse::Error { description } => DeviceEvent::StepperError {
+            TurntableResponse::Error { description } => DeviceEvent::TurntableError {
                 description: description.clone(),
             },
         }),

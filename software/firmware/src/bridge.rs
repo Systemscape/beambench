@@ -94,7 +94,7 @@ impl PeerTable {
         DeviceEvent::Status {
             tx_connected: self.tx.is_some(),
             rx_connected: self.rx.is_some(),
-            stepper_connected: self.turntable.is_some(),
+            turntable_connected: self.turntable.is_some(),
         }
     }
 }
@@ -230,7 +230,7 @@ async fn send_to_role(
         let _ = desc.push_str(match role {
             Role::Rx => "RX",
             Role::Tx => "TX",
-            Role::Turntable => "Stepper",
+            Role::Turntable => "Turntable",
             Role::Bridge => "Bridge",
         });
         event_tx.send(DeviceEvent::Error { description: desc }).await;

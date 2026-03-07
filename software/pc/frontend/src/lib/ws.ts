@@ -18,7 +18,7 @@ export type SystemStatus = {
     tx_connected: boolean;
     /** Whether the RX (receiver) ESP32 is paired via ESP-NOW. */
     rx_connected: boolean;
-    /** Whether the turntable stepper ESP32 is paired via ESP-NOW. */
+    /** Whether the turntable ESP32 is paired via ESP-NOW. */
     turntable_connected: boolean;
     /** Whether the PC is connected to the Bridge over serial. */
     serial_connected: boolean;

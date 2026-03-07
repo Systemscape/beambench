@@ -1,6 +1,6 @@
 //! Beambench unified firmware — single binary for all ESP32-C3 devices.
 //!
-//! The device role (Bridge, RX, TX, Stepper) is stored in a flash partition.
+//! The device role (Bridge, RX, TX, Turntable) is stored in a flash partition.
 //! Use `--features role-<name>` to provision a device with a specific role.
 //! Without a role feature, the firmware reads the role from flash.
 
@@ -13,7 +13,7 @@ mod motor;
 mod ota_responder;
 mod role_provision;
 mod rx;
-mod stepper;
+mod turntable;
 mod tx;
 
 use defmt::info;
@@ -154,17 +154,17 @@ async fn main(spawner: Spawner) -> ! {
                     dir,
                     en,
                     esp_hal::delay::Delay::new(),
-                    stepper::DEFAULT_STEP_DELAY_US,
+                    turntable::DEFAULT_STEP_DELAY_US,
                 );
                 let motor = mk_static!(
                     Mutex::<NoopRawMutex, StepDirMotor<'static>>,
                     Mutex::new(motor)
                 );
-                stepper::run(spawner, motor, manager, sender, receiver, led_signal, flash).await;
+                turntable::run(spawner, motor, manager, sender, receiver, led_signal, flash).await;
             }
             #[cfg(not(feature = "step-dir"))]
             {
-                defmt::panic!("No motor backend selected for stepper role");
+                defmt::panic!("No motor backend selected for turntable role");
             }
         }
     }

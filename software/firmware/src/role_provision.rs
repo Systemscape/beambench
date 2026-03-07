@@ -39,7 +39,7 @@ pub fn resolve_role(storage: &mut FlashStorage<'_>) -> Role {
             }
             None => {
                 defmt::panic!(
-                    "No role provisioned! Flash with --features role-<rx|tx|stepper|bridge>"
+                    "No role provisioned! Flash with --features role-<rx|tx|turntable|bridge>"
                 );
             }
         }
@@ -51,11 +51,11 @@ fn feature_role() -> Option<Role> {
     // Compile-time check: at most one role feature may be active.
     #[cfg(any(
         all(feature = "role-rx", feature = "role-tx"),
-        all(feature = "role-rx", feature = "role-stepper"),
+        all(feature = "role-rx", feature = "role-turntable"),
         all(feature = "role-rx", feature = "role-bridge"),
-        all(feature = "role-tx", feature = "role-stepper"),
+        all(feature = "role-tx", feature = "role-turntable"),
         all(feature = "role-tx", feature = "role-bridge"),
-        all(feature = "role-stepper", feature = "role-bridge"),
+        all(feature = "role-turntable", feature = "role-bridge"),
     ))]
     compile_error!("At most one role-* feature may be active");
 
@@ -63,7 +63,7 @@ fn feature_role() -> Option<Role> {
     return Some(Role::Rx);
     #[cfg(feature = "role-tx")]
     return Some(Role::Tx);
-    #[cfg(feature = "role-stepper")]
+    #[cfg(feature = "role-turntable")]
     return Some(Role::Turntable);
     #[cfg(feature = "role-bridge")]
     return Some(Role::Bridge);
