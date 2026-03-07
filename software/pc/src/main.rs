@@ -6,11 +6,11 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use axum::{
     Router,
     extract::{
-        State,
+        Multipart, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     response::{IntoResponse, Json},
-    routing::get,
+    routing::{get, post},
 };
 use clap::Parser;
 use rust_embed::Embed;
@@ -179,6 +179,7 @@ async fn main() {
         .route("/api/ports", get(list_ports))
         .route("/api/data", get(get_data))
         .route("/api/export/csv", get(export_csv_handler))
+        .route("/api/ota", post(ota_upload))
         .route("/ws", get(ws_handler));
 
     let app = if args.dev {
@@ -217,6 +218,76 @@ async fn export_csv_handler(State(state): State<Arc<AppState>>) -> impl IntoResp
         )],
         csv,
     )
+}
+
+/// Accept a firmware binary via multipart form and start OTA streaming.
+///
+/// Fields: `target` (string: "rx", "tx", "turntable") and `file` (binary).
+async fn ota_upload(
+    State(state): State<Arc<AppState>>,
+    mut multipart: Multipart,
+) -> impl IntoResponse {
+    let mut target: Option<String> = None;
+    let mut firmware: Option<Vec<u8>> = None;
+
+    while let Ok(Some(field)) = multipart.next_field().await {
+        match field.name() {
+            Some("target") => {
+                target = field.text().await.ok();
+            }
+            Some("file") => {
+                firmware = field.bytes().await.ok().map(|b| b.to_vec());
+            }
+            _ => {}
+        }
+    }
+
+    let Some(target_str) = target else {
+        return Json(serde_json::json!({"error": "Missing 'target' field"}));
+    };
+    let Some(firmware) = firmware else {
+        return Json(serde_json::json!({"error": "Missing 'file' field"}));
+    };
+    let Some(role) = beambench_pc::ota::parse_role(&target_str) else {
+        return Json(serde_json::json!({"error": format!("Unknown target: {}", target_str)}));
+    };
+
+    if state.sweeping.load(Ordering::SeqCst) {
+        return Json(serde_json::json!({"error": "Sweep in progress"}));
+    }
+    if state.ota_in_progress.swap(true, Ordering::SeqCst) {
+        return Json(serde_json::json!({"error": "OTA already in progress"}));
+    }
+
+    let Some((serial_tx, serial_rx)) = state.clone_serial().await else {
+        state.ota_in_progress.store(false, Ordering::SeqCst);
+        return Json(serde_json::json!({"error": "Not connected"}));
+    };
+
+    let size = firmware.len();
+    let _ = state.ws_tx.send(WsEvent::Log {
+        message: format!("Starting OTA for {}: {} bytes", target_str, size),
+    });
+
+    let state = state.clone();
+    tokio::spawn(async move {
+        match beambench_pc::ota::stream_firmware(&firmware, role, &serial_tx, &serial_rx, &state.ws_tx)
+            .await
+        {
+            Ok(()) => {
+                let _ = state.ws_tx.send(WsEvent::OtaFinished);
+                let _ = state.ws_tx.send(WsEvent::Log {
+                    message: "OTA complete — device will reboot".to_string(),
+                });
+            }
+            Err(e) => {
+                state.broadcast_error(&format!("OTA failed: {}", e), &e);
+            }
+        }
+        state.ota_in_progress.store(false, Ordering::SeqCst);
+    });
+
+    Json(serde_json::json!({"ok": true, "size": size}))
 }
 
 async fn ws_handler(

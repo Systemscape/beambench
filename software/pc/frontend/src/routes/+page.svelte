@@ -65,6 +65,13 @@
     // Turntable position (tracked from JogComplete / HomeComplete)
     let turntableAngle = $state(0);
 
+    // OTA state
+    let otaInProgress = $state(false);
+    let otaChunksSent = $state(0);
+    let otaTotalChunks = $state(0);
+    let otaTarget = $state('rx');
+    let otaFile: File | null = $state(null);
+
     /** Client-side mirror of SweepConfig::validate(). */
     let configError: string | null = $derived.by(() => {
         if (stepDeg <= 0) return 'Step size must be positive';
@@ -140,6 +147,16 @@
                 turntableAngle = event.angle_deg;
                 addLog(`Turntable at ${event.angle_deg.toFixed(1)}°`);
                 break;
+            case 'OtaProgress':
+                otaChunksSent = event.chunks_sent;
+                otaTotalChunks = event.total_chunks;
+                break;
+            case 'OtaFinished':
+                otaInProgress = false;
+                otaChunksSent = 0;
+                otaTotalChunks = 0;
+                addLog('OTA complete — device will reboot');
+                break;
             case 'Status':
                 connecting = false;
                 status = {
@@ -157,6 +174,7 @@
                 stopping = false;
                 homing = false;
                 jogging = false;
+                otaInProgress = false;
                 errorMessage = event.message;
                 addLog(`Error: ${event.message}`);
                 setTimeout(() => {
@@ -322,6 +340,33 @@
     function jog(delta: number) {
         jogging = true;
         ws?.send({ type: 'Jog', delta_deg: delta });
+    }
+
+    async function startOta() {
+        if (!otaFile) return;
+        otaInProgress = true;
+        otaChunksSent = 0;
+        otaTotalChunks = 0;
+
+        const formData = new FormData();
+        formData.append('target', otaTarget);
+        formData.append('file', otaFile);
+
+        try {
+            const res = await fetch('/api/ota', { method: 'POST', body: formData });
+            const json = await res.json();
+            if (json.error) {
+                otaInProgress = false;
+                errorMessage = json.error;
+                addLog(`OTA failed: ${json.error}`);
+                setTimeout(() => { errorMessage = ''; }, 5000);
+            }
+        } catch (e) {
+            otaInProgress = false;
+            errorMessage = 'Failed to upload firmware';
+            addLog('OTA upload failed');
+            setTimeout(() => { errorMessage = ''; }, 5000);
+        }
     }
 
     function toggleMeasurement(id: number) {
@@ -562,6 +607,38 @@
                         disabled={activeData.length === 0 &&
                             measurements.length === 0}>Download CSV</button>
                 </a>
+            </section>
+
+            <section>
+                <h2>OTA Update</h2>
+                <div class="field">
+                    <label for="ota-target">Target device</label>
+                    <select id="ota-target" bind:value={otaTarget} disabled={otaInProgress}>
+                        <option value="rx">RX (Receiver)</option>
+                        <option value="tx">TX (Transmitter)</option>
+                        <option value="turntable">Turntable</option>
+                    </select>
+                </div>
+                <div class="field">
+                    <label for="ota-file">Firmware binary</label>
+                    <input
+                        id="ota-file"
+                        type="file"
+                        accept=".bin"
+                        disabled={otaInProgress}
+                        onchange={(e) => { otaFile = (e.target as HTMLInputElement).files?.[0] ?? null; }} />
+                </div>
+                {#if otaInProgress && otaTotalChunks > 0}
+                    <progress value={otaChunksSent} max={otaTotalChunks}></progress>
+                    <p class="info">{Math.round(otaChunksSent / otaTotalChunks * 100)}%</p>
+                {/if}
+                <div class="button-row">
+                    <button
+                        onclick={startOta}
+                        disabled={!otaFile || !status.serial_connected || otaInProgress || status.sweeping}>
+                        {otaInProgress ? 'Updating...' : 'Start OTA Update'}
+                    </button>
+                </div>
             </section>
 
             <section class="log-section">
@@ -875,5 +952,29 @@
     .jog-indicator {
         color: #ffa726;
         font-style: italic;
+    }
+
+    progress {
+        width: 100%;
+        height: 6px;
+        border: none;
+        border-radius: 3px;
+        background: #222;
+        margin-top: 0.5rem;
+    }
+
+    progress::-webkit-progress-bar {
+        background: #222;
+        border-radius: 3px;
+    }
+
+    progress::-webkit-progress-value {
+        background: #4caf50;
+        border-radius: 3px;
+    }
+
+    progress::-moz-progress-bar {
+        background: #4caf50;
+        border-radius: 3px;
     }
 </style>

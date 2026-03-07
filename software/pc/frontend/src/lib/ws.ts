@@ -58,6 +58,8 @@ export type WsEvent =
           serial_connected: boolean;
           data_points: number;
       }
+    | { type: 'OtaProgress'; chunks_sent: number; total_chunks: number }
+    | { type: 'OtaFinished' }
     | { type: 'Error'; message: string }
     | { type: 'Log'; message: string };
 
