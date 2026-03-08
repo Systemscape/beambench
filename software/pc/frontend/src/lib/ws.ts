@@ -24,6 +24,10 @@ export type SystemStatus = {
     serial_connected: boolean;
     /** Total data points collected in the current session. */
     data_points: number;
+    /** Active RF measurement backend name (e.g. "espnow", "dect-nr+"). */
+    backend_name: string;
+    /** Carrier frequency in MHz, if applicable. */
+    backend_freq_mhz: number | null;
 };
 
 /** A serial port available on the host machine. */
@@ -57,6 +61,8 @@ export type WsEvent =
           turntable_connected: boolean;
           serial_connected: boolean;
           data_points: number;
+          backend_name: string;
+          backend_freq_mhz: number | null;
       }
     | { type: 'OtaProgress'; chunks_sent: number; total_chunks: number }
     | { type: 'OtaFinished' }

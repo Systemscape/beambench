@@ -9,6 +9,7 @@
 
 mod bridge;
 mod common;
+mod measurement;
 mod motor;
 mod ota_responder;
 mod role_provision;
@@ -134,10 +135,40 @@ async fn main(spawner: Spawner) -> ! {
             bridge::run(spawner, manager, sender, receiver, led_signal, usb_rx, usb_tx).await;
         }
         Role::Rx => {
-            rx::run(spawner, manager, sender, receiver, led_signal, flash).await;
+            #[cfg(not(feature = "backend-uart"))]
+            {
+                rx::run(spawner, manager, sender, receiver, led_signal, flash).await;
+            }
+            #[cfg(feature = "backend-uart")]
+            {
+                let uart = esp_hal::uart::Uart::new(
+                    peripherals.UART1,
+                    esp_hal::uart::Config::default(),
+                )
+                .unwrap()
+                .with_rx(peripherals.GPIO5)
+                .with_tx(peripherals.GPIO4)
+                .into_async();
+                rx::run(spawner, manager, sender, receiver, led_signal, flash, uart).await;
+            }
         }
         Role::Tx => {
-            tx::run(spawner, manager, sender, receiver, led_signal, flash).await;
+            #[cfg(not(feature = "backend-uart"))]
+            {
+                tx::run(spawner, manager, sender, receiver, led_signal, flash).await;
+            }
+            #[cfg(feature = "backend-uart")]
+            {
+                let uart = esp_hal::uart::Uart::new(
+                    peripherals.UART1,
+                    esp_hal::uart::Config::default(),
+                )
+                .unwrap()
+                .with_rx(peripherals.GPIO5)
+                .with_tx(peripherals.GPIO4)
+                .into_async();
+                tx::run(spawner, manager, sender, receiver, led_signal, flash, uart).await;
+            }
         }
         Role::Turntable => {
             // Create motor here so GPIO pins don't need to cross task boundaries.

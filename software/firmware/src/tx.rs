@@ -1,7 +1,8 @@
-//! TX role — ESPNOW transmitter for antenna pattern measurements.
+//! TX role — signal transmitter for antenna pattern measurements.
 //!
-//! Broadcasts discovery beacons, waits for the Bridge to pair, then transmits
-//! MeasurementBeacon packets at a configurable rate for RSSI measurement.
+//! Broadcasts discovery beacons, waits for the Bridge to pair, then controls
+//! signal transmission via the active backend (ESP-NOW beacons or UART to
+//! an external TX board).
 
 use defmt::info;
 use embassy_executor::Spawner;
@@ -14,30 +15,17 @@ use esp_radio::esp_now::{
 use beambench_protocol::{self as proto, EspnowMessage, Role};
 
 use crate::common::*;
+use crate::measurement::{ActiveTxBackend, TxBackend};
 use crate::mk_static;
 
-const DEFAULT_TX_INTERVAL: Duration = Duration::from_millis(100);
-
 struct TxState {
-    transmitting: bool,
-    tx_interval: Duration,
+    backend: ActiveTxBackend,
     bridge_paired: bool,
     bridge_mac: [u8; 6],
     last_bridge_seen: Option<Instant>,
 }
 
-impl TxState {
-    fn new() -> Self {
-        Self {
-            transmitting: false,
-            tx_interval: DEFAULT_TX_INTERVAL,
-            bridge_paired: false,
-            bridge_mac: [0u8; 6],
-            last_bridge_seen: None,
-        }
-    }
-}
-
+#[cfg(not(feature = "backend-uart"))]
 pub async fn run(
     spawner: Spawner,
     manager: &'static EspNowManager<'static>,
@@ -46,9 +34,57 @@ pub async fn run(
     led_signal: &'static Signal<NoopRawMutex, LedState>,
     flash: &'static SharedFlash,
 ) -> ! {
+    run_inner(
+        spawner,
+        manager,
+        sender,
+        receiver,
+        led_signal,
+        flash,
+        crate::measurement::espnow::EspNowTxBackend::new(),
+    )
+    .await
+}
+
+#[cfg(feature = "backend-uart")]
+pub async fn run(
+    spawner: Spawner,
+    manager: &'static EspNowManager<'static>,
+    sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
+    receiver: EspNowReceiver<'static>,
+    led_signal: &'static Signal<NoopRawMutex, LedState>,
+    flash: &'static SharedFlash,
+    uart: esp_hal::uart::Uart<'static, esp_hal::Async>,
+) -> ! {
+    run_inner(
+        spawner,
+        manager,
+        sender,
+        receiver,
+        led_signal,
+        flash,
+        crate::measurement::uart::UartTxBackend::new(uart),
+    )
+    .await
+}
+
+async fn run_inner(
+    spawner: Spawner,
+    manager: &'static EspNowManager<'static>,
+    sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
+    receiver: EspNowReceiver<'static>,
+    led_signal: &'static Signal<NoopRawMutex, LedState>,
+    flash: &'static SharedFlash,
+    backend: ActiveTxBackend,
+) -> ! {
     let state = mk_static!(
         Mutex::<NoopRawMutex, TxState>,
-        Mutex::<NoopRawMutex, _>::new(TxState::new())
+        Mutex::<NoopRawMutex, _>::new(TxState {
+            backend,
+            bridge_paired: false,
+            bridge_mac: [0u8; 6],
+            last_bridge_seen: None,
+        })
     );
     let ota = mk_static!(
         Mutex::<NoopRawMutex, crate::ota_responder::OtaState>,
@@ -57,11 +93,13 @@ pub async fn run(
 
     spawner.spawn(tx_discovery_task(manager, sender, state, led_signal)).ok();
     spawner.spawn(tx_listener_task(manager, sender, receiver, state, led_signal, flash, ota)).ok();
+
+    // ESP-NOW backend: spawn the beacon broadcast loop.
+    #[cfg(not(feature = "backend-uart"))]
     spawner.spawn(tx_transmit_task(sender, state)).ok();
 
     info!("TX role ready, broadcasting discovery beacons");
 
-    // Keep this task alive — LED loop runs in main.
     loop {
         Timer::after(Duration::from_secs(60)).await;
     }
@@ -91,7 +129,7 @@ async fn tx_discovery_task(
                 info!("Bridge heartbeat timeout, unpairing");
                 let _ = manager.remove_peer(&s.bridge_mac);
                 s.bridge_paired = false;
-                s.transmitting = false;
+                s.backend.stop_transmit().await;
                 s.last_bridge_seen = None;
             }
             signal_pairing_led(led_signal, s.bridge_paired);
@@ -149,15 +187,13 @@ async fn tx_listener_task(
                         packet_rate_hz,
                     } => {
                         info!("Configured: rate={}Hz", packet_rate_hz);
-                        let mut s = state.lock().await;
-                        if packet_rate_hz > 0 {
-                            s.tx_interval =
-                                Duration::from_millis(1000 / packet_rate_hz as u64);
-                        }
+                        // ESP-NOW backend: adjust beacon broadcast rate.
+                        #[cfg(not(feature = "backend-uart"))]
+                        state.lock().await.backend.set_packet_rate(packet_rate_hz);
                     }
                     proto::TxCommand::StartTransmit => {
                         info!("Start transmitting");
-                        state.lock().await.transmitting = true;
+                        state.lock().await.backend.start_transmit().await;
                         led_signal.signal(LedState::Blink {
                             color: COLOR_AMBER,
                             period_ms: 200,
@@ -165,7 +201,7 @@ async fn tx_listener_task(
                     }
                     proto::TxCommand::StopTransmit => {
                         info!("Stop transmitting");
-                        state.lock().await.transmitting = false;
+                        state.lock().await.backend.stop_transmit().await;
                         led_signal.signal(LedState::Solid(COLOR_GREEN));
                     }
                 }
@@ -179,18 +215,19 @@ async fn tx_listener_task(
     }
 }
 
+/// ESP-NOW backend only: broadcasts `MeasurementBeacon` frames at the configured rate.
+#[cfg(not(feature = "backend-uart"))]
 #[embassy_executor::task]
 async fn tx_transmit_task(
     sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
     state: &'static Mutex<NoopRawMutex, TxState>,
 ) {
-    // MeasurementBeacon is broadcast so RX can measure the direct TX->RX RF path.
     let mut buf = [0u8; proto::MAX_MSG_SIZE];
 
     loop {
         let (transmitting, interval) = {
             let s = state.lock().await;
-            (s.transmitting, s.tx_interval)
+            (s.backend.is_transmitting(), s.backend.tx_interval())
         };
 
         if transmitting {

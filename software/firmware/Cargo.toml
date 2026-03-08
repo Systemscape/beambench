@@ -13,6 +13,9 @@ role-rx      = []
 role-tx      = []
 role-turntable = []
 
+# Measurement backend (default: ESP-NOW RSSI).
+backend-uart = []
+
 # Motor backend for the turntable role.
 step-dir = []
 servo42c = ["dep:mks-servo42-rs"]

@@ -1,9 +1,7 @@
-//! RX role — RSSI measurement device.
+//! RX role — measurement device.
 //!
-//! In the v2 architecture, RX is a passive measurement device:
-//! - Listens for MeasurementBeacon broadcasts from TX
-//! - Accumulates RSSI samples between StartMeasurement and ReportMeasurement
-//! - Reports results to the Bridge on demand
+//! Listens for commands from the Bridge over ESP-NOW and delegates
+//! measurement to the active backend (ESP-NOW RSSI or UART external board).
 
 use defmt::info;
 use embassy_executor::Spawner;
@@ -14,29 +12,19 @@ use esp_radio::esp_now::{
 };
 
 use beambench_protocol::{self as proto, EspnowMessage, Role};
-use beambench_protocol::rx_logic::MeasurementState;
 
 use crate::common::*;
+use crate::measurement::{ActiveRxBackend, RxBackend};
 use crate::mk_static;
 
 struct RxState {
     bridge_paired: bool,
     bridge_mac: [u8; 6],
     last_bridge_seen: Option<Instant>,
-    measurement: MeasurementState,
+    measurement: ActiveRxBackend,
 }
 
-impl RxState {
-    fn new() -> Self {
-        Self {
-            bridge_paired: false,
-            bridge_mac: [0u8; 6],
-            last_bridge_seen: None,
-            measurement: MeasurementState::new(),
-        }
-    }
-}
-
+#[cfg(not(feature = "backend-uart"))]
 pub async fn run(
     spawner: Spawner,
     manager: &'static EspNowManager<'static>,
@@ -45,9 +33,57 @@ pub async fn run(
     led_signal: &'static Signal<NoopRawMutex, LedState>,
     flash: &'static SharedFlash,
 ) -> ! {
+    run_inner(
+        spawner,
+        manager,
+        sender,
+        receiver,
+        led_signal,
+        flash,
+        crate::measurement::espnow::EspNowRxBackend::new(),
+    )
+    .await
+}
+
+#[cfg(feature = "backend-uart")]
+pub async fn run(
+    spawner: Spawner,
+    manager: &'static EspNowManager<'static>,
+    sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
+    receiver: EspNowReceiver<'static>,
+    led_signal: &'static Signal<NoopRawMutex, LedState>,
+    flash: &'static SharedFlash,
+    uart: esp_hal::uart::Uart<'static, esp_hal::Async>,
+) -> ! {
+    run_inner(
+        spawner,
+        manager,
+        sender,
+        receiver,
+        led_signal,
+        flash,
+        crate::measurement::uart::UartRxBackend::new(uart),
+    )
+    .await
+}
+
+async fn run_inner(
+    spawner: Spawner,
+    manager: &'static EspNowManager<'static>,
+    sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
+    receiver: EspNowReceiver<'static>,
+    led_signal: &'static Signal<NoopRawMutex, LedState>,
+    flash: &'static SharedFlash,
+    backend: ActiveRxBackend,
+) -> ! {
     let state = mk_static!(
         Mutex::<NoopRawMutex, RxState>,
-        Mutex::<NoopRawMutex, _>::new(RxState::new())
+        Mutex::<NoopRawMutex, _>::new(RxState {
+            bridge_paired: false,
+            bridge_mac: [0u8; 6],
+            last_bridge_seen: None,
+            measurement: backend,
+        })
     );
     let ota = mk_static!(
         Mutex::<NoopRawMutex, crate::ota_responder::OtaState>,
@@ -119,6 +155,7 @@ async fn rx_listener_task(
         let received = receiver.receive_async().await;
         let data = received.data();
         let src = received.info.src_address;
+        #[cfg(not(feature = "backend-uart"))]
         let rssi = received.info.rx_control.rssi;
 
         let msg: Result<EspnowMessage, _> = proto::deserialize(data);
@@ -149,36 +186,38 @@ async fn rx_listener_task(
                 }
                 s.last_bridge_seen = Some(Instant::now());
             }
-            Ok(ref espnow_msg @ EspnowMessage::StartMeasurement) => {
+            Ok(EspnowMessage::StartMeasurement) => {
                 let mut s = state.lock().await;
                 s.last_bridge_seen = Some(Instant::now());
-                s.measurement.handle_message(espnow_msg, 0);
+                s.measurement.start().await;
                 info!("Measurement started");
                 led_signal.signal(LedState::Blink { color: COLOR_AMBER, period_ms: 200 });
             }
-            Ok(ref espnow_msg @ EspnowMessage::ReportMeasurement) => {
+            Ok(EspnowMessage::ReportMeasurement) => {
                 let mut s = state.lock().await;
                 s.last_bridge_seen = Some(Instant::now());
-                let resp = s.measurement.handle_message(espnow_msg, 0);
+                let result = s.measurement.report().await;
                 let bridge_mac = s.bridge_mac;
                 let paired = s.bridge_paired;
                 drop(s);
 
-                if let Some(EspnowMessage::MeasurementResult { rssi_dbm, sample_count }) = &resp {
-                    info!("Measurement report: {} dBm ({} samples)", rssi_dbm, sample_count);
-                }
+                info!("Measurement report: {} dBm ({} samples)", result.rssi_dbm, result.sample_count);
                 led_signal.signal(LedState::Solid(COLOR_GREEN));
 
                 if paired {
-                    if let Some(resp_msg) = resp {
-                        let mut buf = [0u8; proto::MAX_MSG_SIZE];
-                        if let Ok(data) = proto::serialize(&resp_msg, &mut buf) {
-                            let mut s = sender.lock().await;
-                            let _ = s.send_async(&bridge_mac, data).await;
-                        }
+                    let resp = EspnowMessage::MeasurementResult {
+                        rssi_dbm: result.rssi_dbm,
+                        sample_count: result.sample_count,
+                    };
+                    let mut buf = [0u8; proto::MAX_MSG_SIZE];
+                    if let Ok(data) = proto::serialize(&resp, &mut buf) {
+                        let mut s = sender.lock().await;
+                        let _ = s.send_async(&bridge_mac, data).await;
                     }
                 }
             }
+            // ESP-NOW backend only: accumulate RSSI from beacon frames.
+            #[cfg(not(feature = "backend-uart"))]
             Ok(EspnowMessage::MeasurementBeacon) => {
                 state.lock().await.measurement.accumulate_rssi(rssi);
             }

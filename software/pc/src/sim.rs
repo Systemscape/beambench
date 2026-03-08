@@ -89,6 +89,10 @@ pub async fn handle_connection(stream: tokio::net::TcpStream) {
                         tx_connected: true,
                         rx_connected: true,
                         turntable_connected: true,
+                        backend: beambench_protocol::BackendInfo {
+                            name: heapless::String::try_from("sim").unwrap(),
+                            frequency_mhz: Some(2400),
+                        },
                     })
                     .await;
             }

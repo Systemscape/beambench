@@ -51,6 +51,10 @@ pub struct SystemStatus {
     pub serial_connected: bool,
     /// Number of data points stored on the backend.
     pub data_points: usize,
+    /// Active RF measurement backend name (e.g. "espnow", "dect-nr+").
+    pub backend_name: String,
+    /// Carrier frequency in MHz, if applicable.
+    pub backend_freq_mhz: Option<u16>,
 }
 
 /// Serial port information returned by the list_ports endpoint.
@@ -237,6 +241,8 @@ mod tests {
             turntable_connected: true,
             serial_connected: true,
             data_points: 42,
+            backend_name: "espnow".to_string(),
+            backend_freq_mhz: Some(2400),
         }));
     }
 

@@ -67,6 +67,8 @@ struct AppState {
     tx_connected: AtomicBool,
     rx_connected: AtomicBool,
     turntable_connected: AtomicBool,
+    backend_name: Mutex<String>,
+    backend_freq_mhz: Mutex<Option<u16>>,
     /// Tracked turntable angle in centi-degrees (×100) for atomic access.
     turntable_angle_cdeg: AtomicI32,
     /// Whether a jog move is in progress.
@@ -92,6 +94,8 @@ impl AppState {
                 && self.turntable_connected.load(Ordering::SeqCst),
             serial_connected,
             data_points: self.data.lock().await.len(),
+            backend_name: self.backend_name.lock().await.clone(),
+            backend_freq_mhz: *self.backend_freq_mhz.lock().await,
         }
     }
 
@@ -208,6 +212,8 @@ async fn main() {
         tx_connected: AtomicBool::new(false),
         rx_connected: AtomicBool::new(false),
         turntable_connected: AtomicBool::new(false),
+        backend_name: Mutex::new(String::new()),
+        backend_freq_mhz: Mutex::new(None),
         turntable_angle_cdeg: AtomicI32::new(0),
         jogging: AtomicBool::new(false),
         ota_in_progress: AtomicBool::new(false),
@@ -442,7 +448,7 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
                         .await;
 
                         match result {
-                            Ok(Some(beambench_protocol::DeviceEvent::Status { tx_connected, rx_connected, turntable_connected })) => {
+                            Ok(Some(beambench_protocol::DeviceEvent::Status { tx_connected, rx_connected, turntable_connected, backend })) => {
                                 tracing::info!("Device verified as Bridge");
                                 let _ = state2.ws_tx.send(WsEvent::Log {
                                     message: format!("{} confirmed as Bridge (TX: {}, RX: {}, Turntable: {})",
@@ -452,6 +458,7 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
                                         if turntable_connected { "connected" } else { "not found" }),
                                 });
                                 update_peer_status(&state2, tx_connected, rx_connected, turntable_connected);
+                                update_backend_info(&state2, &backend).await;
                                 state2.broadcast_status().await;
                             }
                             Ok(Some(other)) => {
@@ -507,6 +514,8 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
             state.tx_connected.store(false, Ordering::SeqCst);
             state.rx_connected.store(false, Ordering::SeqCst);
             state.turntable_connected.store(false, Ordering::SeqCst);
+            *state.backend_name.lock().await = String::new();
+            *state.backend_freq_mhz.lock().await = None;
             state.broadcast_status().await;
         }
         WsCommand::StartSweep(config) => {
@@ -759,6 +768,12 @@ fn update_peer_status(state: &AppState, tx: bool, rx: bool, turntable: bool) {
     state.turntable_connected.store(turntable, Ordering::SeqCst);
 }
 
+/// Update backend info from a bridge Status response.
+async fn update_backend_info(state: &AppState, backend: &beambench_protocol::BackendInfo) {
+    *state.backend_name.lock().await = backend.name.to_string();
+    *state.backend_freq_mhz.lock().await = backend.frequency_mhz;
+}
+
 /// Periodically poll the bridge for device connection status.
 ///
 /// Stops when the poll generation changes (new connect or disconnect).
@@ -801,8 +816,8 @@ async fn status_poll_loop(
             let mut rx = serial_rx.lock().await;
             loop {
                 match rx.recv().await {
-                    Some(beambench_protocol::DeviceEvent::Status { tx_connected, rx_connected, turntable_connected }) => {
-                        return Some((tx_connected, rx_connected, turntable_connected));
+                    Some(beambench_protocol::DeviceEvent::Status { tx_connected, rx_connected, turntable_connected, backend }) => {
+                        return Some((tx_connected, rx_connected, turntable_connected, backend));
                     }
                     Some(_) => continue,
                     None => return None,
@@ -812,8 +827,9 @@ async fn status_poll_loop(
         .await;
 
         match result {
-            Ok(Some((tx, rx, turntable))) => {
+            Ok(Some((tx, rx, turntable, backend))) => {
                 update_peer_status(state, tx, rx, turntable);
+                update_backend_info(state, &backend).await;
                 state.broadcast_status().await;
             }
             Ok(None) => {

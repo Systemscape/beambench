@@ -39,7 +39,9 @@
         rx_connected: false,
         turntable_connected: false,
         serial_connected: false,
-        data_points: 0
+        data_points: 0,
+        backend_name: '',
+        backend_freq_mhz: null
     });
     let ports: PortInfo[] = $state([]);
     let selectedPort = $state('');
@@ -163,7 +165,9 @@
                     rx_connected: event.rx_connected,
                     turntable_connected: event.turntable_connected,
                     serial_connected: event.serial_connected,
-                    data_points: event.data_points
+                    data_points: event.data_points,
+                    backend_name: event.backend_name,
+                    backend_freq_mhz: event.backend_freq_mhz
                 };
                 if (!event.sweeping) stopping = false;
                 break;
@@ -463,6 +467,12 @@
                         class:active={status.turntable_connected}
                         >Turntable</span>
                 </div>
+                {#if status.backend_name}
+                    <p class="backend-info">
+                        Backend: <strong>{status.backend_name}</strong>{#if status.backend_freq_mhz}
+                            &nbsp;({status.backend_freq_mhz}&nbsp;MHz){/if}
+                    </p>
+                {/if}
             </section>
 
             <section>
@@ -841,6 +851,12 @@
         background: #111;
         border-color: #4caf50;
         color: #4caf50;
+    }
+
+    .backend-info {
+        font-size: 0.75rem;
+        color: #888;
+        margin: 0.5rem 0 0;
     }
 
     .validation-error {

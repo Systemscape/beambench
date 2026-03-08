@@ -95,6 +95,7 @@ impl PeerTable {
             tx_connected: self.tx.is_some(),
             rx_connected: self.rx.is_some(),
             turntable_connected: self.turntable.is_some(),
+            backend: crate::measurement::active_backend_info(),
         }
     }
 }

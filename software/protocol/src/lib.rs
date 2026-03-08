@@ -54,6 +54,18 @@ impl Role {
     }
 }
 
+// ── Measurement backend info ─────────────────────────────────────────────────
+
+/// Describes the active RF measurement backend.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct BackendInfo {
+    /// Short name, e.g. "espnow", "dect-nr+".
+    pub name: String<16>,
+    /// Carrier frequency in MHz, if applicable (e.g. 2400 for ESP-NOW).
+    pub frequency_mhz: Option<u16>,
+}
+
 // ── ESPNOW discovery messages ───────────────────────────────────────────────
 
 /// Broadcast periodically until paired.
@@ -242,6 +254,7 @@ pub enum DeviceEvent {
         tx_connected: bool,
         rx_connected: bool,
         turntable_connected: bool,
+        backend: BackendInfo,
     },
     Error { description: String<128> },
 
@@ -367,8 +380,8 @@ mod test {
     use serde::{Deserialize, Serialize};
 
     use crate::{
-        DeviceEvent, EspnowMessage, HelloBeacon, PairConfirm, PcCommand, PcToRx, Role, RxToPc,
-        TurntableCommand, TurntableResponse, TxCommand, TxResponse, MAX_MSG_SIZE,
+        BackendInfo, DeviceEvent, EspnowMessage, HelloBeacon, PairConfirm, PcCommand, PcToRx,
+        Role, RxToPc, TurntableCommand, TurntableResponse, TxCommand, TxResponse, MAX_MSG_SIZE,
     };
 
     /// Serialize `msg` into `buf` with postcard, then deserialize and assert equality.
@@ -647,6 +660,10 @@ mod test {
                 tx_connected: true,
                 rx_connected: true,
                 turntable_connected: false,
+                backend: BackendInfo {
+                    name: String::try_from("espnow").unwrap(),
+                    frequency_mhz: Some(2400),
+                },
             },
             &mut buf,
         );
