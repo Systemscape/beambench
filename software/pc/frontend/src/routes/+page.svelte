@@ -41,8 +41,12 @@
         serial_connected: false,
         data_points: 0,
         backend_name: '',
-        backend_freq_mhz: null
+        backend_freq_mhz: null,
+        transmission_ratio: 3
     });
+
+    /** Transmission ratio shown in the input. Synced from server Status events. */
+    let transmissionRatioInput = $state(3);
     let ports: PortInfo[] = $state([]);
     let selectedPort = $state('');
     let errorMessage = $state('');
@@ -167,8 +171,10 @@
                     serial_connected: event.serial_connected,
                     data_points: event.data_points,
                     backend_name: event.backend_name,
-                    backend_freq_mhz: event.backend_freq_mhz
+                    backend_freq_mhz: event.backend_freq_mhz,
+                    transmission_ratio: event.transmission_ratio
                 };
+                transmissionRatioInput = event.transmission_ratio;
                 if (!event.sweeping) stopping = false;
                 break;
             case 'Error':
@@ -345,6 +351,12 @@
         ws?.send({ type: 'Jog', delta_deg: delta });
     }
 
+    function applyTransmissionRatio() {
+        const ratio = Number(transmissionRatioInput);
+        if (!Number.isFinite(ratio) || ratio <= 0) return;
+        ws?.send({ type: 'SetTransmissionRatio', ratio });
+    }
+
     function toggleMeasurement(id: number) {
         measurements = measurements.map((m) =>
             m.id === id ? { ...m, visible: !m.visible } : m
@@ -514,6 +526,31 @@
                         disabled={!status.serial_connected || !status.turntable_connected || status.sweeping || homing || jogging}>
                         {homing ? 'Homing...' : 'Return Home'}
                     </button>
+                </div>
+                <div class="field" style="margin-top: 0.75rem">
+                    <label for="ratio">
+                        Transmission ratio (motor° per turntable°)
+                    </label>
+                    <div class="ratio-row">
+                        <input
+                            id="ratio"
+                            type="number"
+                            bind:value={transmissionRatioInput}
+                            min="0.01"
+                            step="0.1" />
+                        <button
+                            class="secondary small-btn"
+                            onclick={applyTransmissionRatio}
+                            disabled={status.sweeping || homing || jogging
+                                || Number(transmissionRatioInput) === status.transmission_ratio
+                                || !(Number(transmissionRatioInput) > 0)}>
+                            Apply
+                        </button>
+                    </div>
+                    <p class="info" style="margin-top: 0.35rem">
+                        Active: 1:{status.transmission_ratio}
+                        &mdash; e.g. 10° turntable = {(10 * status.transmission_ratio).toFixed(1)}° motor
+                    </p>
                 </div>
             </section>
 
@@ -997,6 +1034,21 @@
     .jog-row {
         display: flex;
         gap: 0.35rem;
+    }
+
+    .ratio-row {
+        display: flex;
+        gap: 0.5rem;
+        align-items: center;
+    }
+
+    .ratio-row input {
+        flex: 1;
+    }
+
+    .ratio-row button {
+        flex-shrink: 0;
+        width: auto;
     }
 
     .jog-row button {

@@ -4,12 +4,10 @@ use defmt::info;
 use embassy_executor::Spawner;
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, mutex::Mutex, signal::Signal};
 use embassy_time::{Duration, Instant, Timer};
-use esp_radio::esp_now::{
-    EspNowManager, EspNowReceiver, EspNowSender, BROADCAST_ADDRESS,
-};
+use esp_radio::esp_now::{BROADCAST_ADDRESS, EspNowManager, EspNowReceiver, EspNowSender};
 
-use beambench_protocol::{self as proto, EspnowMessage, Role};
 use beambench_protocol::turntable::{degrees_to_steps, steps_to_degrees};
+use beambench_protocol::{self as proto, EspnowMessage, Role};
 
 use crate::common::*;
 use crate::mk_static;
@@ -52,16 +50,37 @@ pub async fn run(
     );
 
     spawner
-        .spawn(turntable_discovery_task(sender, bridge_mac, last_bridge_seen, manager, led_signal))
+        .spawn(turntable_discovery_task(
+            sender,
+            bridge_mac,
+            last_bridge_seen,
+            manager,
+            led_signal,
+        ))
         .ok();
     spawner
-        .spawn(turntable_listener_task(manager, sender, receiver, bridge_mac, last_bridge_seen, motor_cmd, flash, ota, led_signal))
+        .spawn(turntable_listener_task(
+            manager,
+            sender,
+            receiver,
+            bridge_mac,
+            last_bridge_seen,
+            motor_cmd,
+            flash,
+            ota,
+            led_signal,
+        ))
         .ok();
     spawner
         .spawn(turntable_responder_task(sender, bridge_mac, motor_result))
         .ok();
     spawner
-        .spawn(motor_task_step_dir(motor, motor_cmd, motor_result, led_signal))
+        .spawn(motor_task_step_dir(
+            motor,
+            motor_cmd,
+            motor_result,
+            led_signal,
+        ))
         .ok();
 
     info!("Turntable controller ready, discovering Bridge...");
@@ -172,7 +191,10 @@ async fn turntable_listener_task(
             }
             Ok(ref espnow_msg) if crate::ota_responder::is_ota_message(espnow_msg) => {
                 if let Some(peer) = *bridge_mac.lock().await {
-                    crate::ota_responder::process_and_respond(espnow_msg, ota, flash, sender, &peer, led_signal).await;
+                    crate::ota_responder::process_and_respond(
+                        espnow_msg, ota, flash, sender, &peer, led_signal,
+                    )
+                    .await;
                 }
             }
             _ => {}
@@ -203,9 +225,7 @@ async fn turntable_responder_task(
             MotorResult::Error { msg } => {
                 let mut desc = heapless::String::new();
                 let _ = desc.push_str(msg);
-                EspnowMessage::TurntableResp(proto::TurntableResponse::Error {
-                    description: desc,
-                })
+                EspnowMessage::TurntableResp(proto::TurntableResponse::Error { description: desc })
             }
         };
 
@@ -249,7 +269,7 @@ async fn motor_loop<M: Motor>(
                 let mut m = motor.lock().await;
                 m.set_enabled(true);
                 let result = m.go_to(target_steps);
-                m.set_enabled(false);
+                //m.set_enabled(false);
                 drop(m);
 
                 led_signal.signal(LedState::Solid(COLOR_GREEN));

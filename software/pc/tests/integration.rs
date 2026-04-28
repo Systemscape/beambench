@@ -30,7 +30,7 @@ async fn full_sweep_via_tcp() {
         samples_per_angle: 5,
     };
 
-    let result = beambench_pc::sweep::run_sweep(config, &serial_tx, &serial_rx, &ws_tx)
+    let result = beambench_pc::sweep::run_sweep(config, 1.0, &serial_tx, &serial_rx, &ws_tx)
         .await
         .expect("sweep should succeed");
 

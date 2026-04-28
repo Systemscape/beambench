@@ -28,6 +28,8 @@ export type SystemStatus = {
     backend_name: string;
     /** Carrier frequency in MHz, if applicable. */
     backend_freq_mhz: number | null;
+    /** Motor-to-turntable gear ratio (motor_deg = turntable_deg × ratio). */
+    transmission_ratio: number;
 };
 
 /** A serial port available on the host machine. */
@@ -63,6 +65,7 @@ export type WsEvent =
           data_points: number;
           backend_name: string;
           backend_freq_mhz: number | null;
+          transmission_ratio: number;
       }
     | { type: 'OtaProgress'; chunks_sent: number; total_chunks: number }
     | { type: 'OtaFinished' }
@@ -95,7 +98,8 @@ export type WsCommand =
     | { type: 'Disconnect' }
     | { type: 'ExportCsv' }
     | { type: 'ReturnHome' }
-    | { type: 'Jog'; delta_deg: number };
+    | { type: 'Jog'; delta_deg: number }
+    | { type: 'SetTransmissionRatio'; ratio: number };
 
 export function createWsConnection(
     onEvent: (event: WsEvent) => void,

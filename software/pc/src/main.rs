@@ -1,7 +1,7 @@
 //! Beambench PC application — Axum server with WebSocket and embedded frontend.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 
 use axum::{
     Router,
@@ -17,7 +17,9 @@ use rust_embed::Embed;
 use tokio::sync::{Mutex, broadcast, watch};
 use tracing::info;
 
-use beambench_pc::{PortInfo, SystemStatus, WsCommand, WsEvent, export_csv};
+use beambench_pc::{
+    DEFAULT_TRANSMISSION_RATIO, PortInfo, SystemStatus, WsCommand, WsEvent, export_csv,
+};
 
 /// Initial delay before sending QueryStatus to a freshly-opened device.
 /// Gives the USB-serial interface time to stabilize.
@@ -77,6 +79,19 @@ struct AppState {
     ota_in_progress: AtomicBool,
     /// Incremented on each connect/disconnect to cancel stale status pollers.
     poll_generation: watch::Sender<u64>,
+    /// Motor-to-turntable gear ratio, stored as f32 bits for atomic access.
+    transmission_ratio_bits: AtomicU32,
+}
+
+impl AppState {
+    fn transmission_ratio(&self) -> f32 {
+        f32::from_bits(self.transmission_ratio_bits.load(Ordering::SeqCst))
+    }
+
+    fn set_transmission_ratio(&self, ratio: f32) {
+        self.transmission_ratio_bits
+            .store(ratio.to_bits(), Ordering::SeqCst);
+    }
 }
 
 impl AppState {
@@ -96,6 +111,7 @@ impl AppState {
             data_points: self.data.lock().await.len(),
             backend_name: self.backend_name.lock().await.clone(),
             backend_freq_mhz: *self.backend_freq_mhz.lock().await,
+            transmission_ratio: self.transmission_ratio(),
         }
     }
 
@@ -218,6 +234,7 @@ async fn main() {
         jogging: AtomicBool::new(false),
         ota_in_progress: AtomicBool::new(false),
         poll_generation: poll_gen_tx,
+        transmission_ratio_bits: AtomicU32::new(DEFAULT_TRANSMISSION_RATIO.to_bits()),
     });
 
     let api = Router::new()
@@ -553,10 +570,16 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
                 });
                 let _ = state.ws_tx.send(WsEvent::Status(state.status().await));
 
+                let ratio = state.transmission_ratio();
                 tokio::spawn(async move {
-                    let result =
-                        beambench_pc::sweep::run_sweep(config, &serial_tx, &serial_rx, &state.ws_tx)
-                            .await;
+                    let result = beambench_pc::sweep::run_sweep(
+                        config,
+                        ratio,
+                        &serial_tx,
+                        &serial_rx,
+                        &state.ws_tx,
+                    )
+                    .await;
                     match &result {
                         Ok(data) => {
                             let _ = state.ws_tx.send(WsEvent::Log {
@@ -715,6 +738,19 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
                 );
             }
         }
+        WsCommand::SetTransmissionRatio { ratio } => {
+            if !ratio.is_finite() || ratio <= 0.0 {
+                let _ = state.ws_tx.send(WsEvent::Error {
+                    message: format!("Invalid transmission ratio: {}", ratio),
+                });
+                return;
+            }
+            state.set_transmission_ratio(ratio);
+            let _ = state.ws_tx.send(WsEvent::Log {
+                message: format!("Transmission ratio set to 1:{}", ratio),
+            });
+            state.broadcast_status().await;
+        }
         WsCommand::Jog { delta_deg } => {
             if state.sweeping.load(Ordering::SeqCst) || state.homing.load(Ordering::SeqCst) || state.ota_in_progress.load(Ordering::SeqCst) {
                 let _ = state.ws_tx.send(WsEvent::Error {
@@ -731,6 +767,8 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
 
             let current_cdeg = state.turntable_angle_cdeg.load(Ordering::SeqCst);
             let target_deg = (current_cdeg as f32 / 100.0) + delta_deg;
+            let ratio = state.transmission_ratio();
+            let motor_target_deg = target_deg * ratio;
 
             if let Some((serial_tx, serial_rx)) = state.clone_serial().await {
                 let _ = state.ws_tx.send(WsEvent::Log {
@@ -739,8 +777,9 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
 
                 let state = state.clone();
                 tokio::spawn(async move {
-                    match send_and_wait_move(&serial_tx, &serial_rx, beambench_protocol::PcCommand::MoveTo { angle_deg: target_deg }).await {
-                        Ok(angle_deg) => {
+                    match send_and_wait_move(&serial_tx, &serial_rx, beambench_protocol::PcCommand::MoveTo { angle_deg: motor_target_deg }).await {
+                        Ok(motor_angle_deg) => {
+                            let angle_deg = motor_angle_deg / ratio;
                             state.turntable_angle_cdeg.store((angle_deg * 100.0) as i32, Ordering::SeqCst);
                             let _ = state.ws_tx.send(WsEvent::Log {
                                 message: format!("Turntable at {:.1}°", angle_deg),

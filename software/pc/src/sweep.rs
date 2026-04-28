@@ -25,14 +25,25 @@ const MEASUREMENT_WINDOW: Duration = Duration::from_millis(500);
 
 /// Run a sweep to completion, sending events to the WebSocket channel.
 ///
+/// `transmission_ratio` is the motor-to-turntable gear ratio: motor angles
+/// sent to firmware are turntable angles multiplied by this value. Data
+/// points and broadcast events stay in the turntable frame.
+///
 /// Returns the collected data points on success.
 pub async fn run_sweep(
     config: SweepConfig,
+    transmission_ratio: f32,
     serial_tx: &mpsc::Sender<PcCommand>,
     serial_rx: &Arc<Mutex<mpsc::Receiver<DeviceEvent>>>,
     ws_tx: &tokio::sync::broadcast::Sender<WsEvent>,
 ) -> Result<Vec<DataPoint>, String> {
     config.validate()?;
+    if !transmission_ratio.is_finite() || transmission_ratio <= 0.0 {
+        return Err(format!(
+            "Invalid transmission ratio: {}",
+            transmission_ratio
+        ));
+    }
 
     info!(
         "Starting sweep: {}° to {}° step {}° ({} samples/angle)",
@@ -64,9 +75,12 @@ pub async fn run_sweep(
     let mut angle = config.start_deg;
 
     while angle <= config.stop_deg {
-        // 1. Move turntable to angle.
+        // 1. Move turntable to angle (firmware speaks the motor frame).
+        let motor_angle = angle * transmission_ratio;
         serial_tx
-            .send(PcCommand::MoveTo { angle_deg: angle })
+            .send(PcCommand::MoveTo {
+                angle_deg: motor_angle,
+            })
             .await
             .map_err(|_| "Serial connection lost".to_string())?;
 
@@ -221,7 +235,7 @@ mod tests {
 
         let config = test_config();
         let handle = tokio::spawn(async move {
-            run_sweep(config, &serial_tx, &resp_rx, &ws_tx).await
+            run_sweep(config, 1.0, &serial_tx, &resp_rx, &ws_tx).await
         });
 
         // Respond to commands from the sweep orchestrator.
@@ -285,7 +299,7 @@ mod tests {
 
         let config = test_config();
         let handle = tokio::spawn(async move {
-            run_sweep(config, &serial_tx, &resp_rx, &ws_tx).await
+            run_sweep(config, 1.0, &serial_tx, &resp_rx, &ws_tx).await
         });
 
         tokio::spawn(async move {
@@ -330,7 +344,7 @@ mod tests {
 
         let config = test_config();
         let handle = tokio::spawn(async move {
-            run_sweep(config, &serial_tx, &resp_rx, &ws_tx).await
+            run_sweep(config, 1.0, &serial_tx, &resp_rx, &ws_tx).await
         });
 
         // Drop the sender to simulate disconnection.
@@ -353,7 +367,7 @@ mod tests {
         tokio::time::pause();
 
         let handle = tokio::spawn(async move {
-            run_sweep(config, &serial_tx, &resp_rx, &ws_tx).await
+            run_sweep(config, 1.0, &serial_tx, &resp_rx, &ws_tx).await
         });
 
         // Advance past TX ack timeout + move timeout.

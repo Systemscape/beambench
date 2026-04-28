@@ -36,6 +36,14 @@ pub struct TxConfig {
     pub packet_rate_hz: u16,
 }
 
+/// Default gear ratio between motor and turntable.
+///
+/// 3.0 means 30° of motor rotation produces 10° of turntable rotation
+/// (a 1:3 reduction). All angles in the WS API and stored data are in the
+/// turntable frame; the backend multiplies by this ratio before sending
+/// to firmware and divides on response.
+pub const DEFAULT_TRANSMISSION_RATIO: f32 = 3.0;
+
 /// Current system status broadcast to all WebSocket clients on state changes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SystemStatus {
@@ -55,6 +63,8 @@ pub struct SystemStatus {
     pub backend_name: String,
     /// Carrier frequency in MHz, if applicable.
     pub backend_freq_mhz: Option<u16>,
+    /// Motor-to-turntable gear ratio (motor_deg = turntable_deg × ratio).
+    pub transmission_ratio: f32,
 }
 
 /// Serial port information returned by the list_ports endpoint.
@@ -115,6 +125,8 @@ pub enum WsCommand {
     /// Start an OTA firmware update for the specified target device.
     /// Target is "rx", "tx", "turntable", or "bridge".
     OtaUpload { target: String, firmware_path: String },
+    /// Set the motor-to-turntable gear ratio (motor_deg = turntable_deg × ratio).
+    SetTransmissionRatio { ratio: f32 },
 }
 
 impl SweepConfig {
@@ -211,6 +223,7 @@ mod tests {
             target: "rx".to_string(),
             firmware_path: "/tmp/firmware.bin".to_string(),
         });
+        json_round_trip(&WsCommand::SetTransmissionRatio { ratio: 2.5 });
     }
 
     #[test]
@@ -243,6 +256,7 @@ mod tests {
             data_points: 42,
             backend_name: "espnow".to_string(),
             backend_freq_mhz: Some(2400),
+            transmission_ratio: 3.0,
         }));
     }
 
