@@ -1,0 +1,72 @@
+[package]
+name = "beambench-firmware"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["step-dir"]
+
+# Role provisioning — at most one may be active. When set, the role is written
+# to flash at boot. When none is set, the role is read from flash.
+role-bridge  = []
+role-rx      = []
+role-tx      = []
+role-turntable = []
+
+# Measurement backend (default: ESP-NOW RSSI).
+backend-uart = []
+
+# Motor backend for the turntable role.
+step-dir = []
+servo42c = ["dep:mks-servo42-rs"]
+
+[dependencies]
+beambench-protocol = { path = "../protocol", features = ["defmt"] }
+
+# ESP32-C3 HAL + radio
+esp-hal = { version = "1.0.0", features = ["esp32c3", "unstable", "defmt"] }
+esp-rtos = { version = "0.2.0", features = ["esp32c3", "embassy", "esp-radio", "defmt"] }
+esp-radio = { version = "0.17.0", features = ["esp32c3", "esp-now", "defmt", "esp-alloc", "unstable"] }
+esp-alloc = "0.9.0"
+esp-storage = { version = "0.8.1", features = ["esp32c3", "defmt"] }
+esp-backtrace = { version = "0.18.1", features = ["esp32c3", "panic-handler", "defmt"] }
+esp-bootloader-esp-idf = { version = "0.4.0", features = ["esp32c3", "defmt"] }
+
+# Async runtime
+embassy-executor = { version = "0.9.1" }
+embassy-futures = "0.1"
+embassy-sync = "0.7"
+embassy-time = "0.5.0"
+static_cell = "2"
+
+# Logging
+defmt = "1.0.1"
+rtt-target = { version = "0.6.2", features = ["defmt"] }
+
+# LED (SK6812 on GPIO2 via RMT)
+esp-hal-smartled2 = "0.28.1"
+smart-leds = "0.4.0"
+
+# Serial (bridge/rx roles)
+embedded-io = "0.7.1"
+embedded-io-async = "0.7"
+
+# Flash storage (role provisioning)
+embedded-storage = "0.3"
+
+# Serialization
+postcard = { version = "1", features = ["experimental-derive"] }
+heapless = "0.9.2"
+critical-section = "1.2.0"
+
+# Motor backends (turntable role)
+mks-servo42-rs = { version = "1.0.3", optional = true }
+sha2 = { version = "0.10.9", default-features = false }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+
+[profile.dev]
+opt-level = "s"

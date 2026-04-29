@@ -56,10 +56,12 @@ impl Motor for StepDirMotor<'_> {
     fn go_to(&mut self, target: Position) -> Result<Position, MotorError> {
         let delta = target - self.position;
 
+        // Motor is mounted reversed relative to the turntable, so the dir
+        // GPIO polarity is flipped vs. the step/dir driver's nominal sense.
         if delta > 0 {
-            self.dir.set_low(); // clockwise
+            self.dir.set_high(); // clockwise (turntable frame)
         } else {
-            self.dir.set_high(); // counter-clockwise
+            self.dir.set_low(); // counter-clockwise (turntable frame)
         }
 
         let steps = delta.unsigned_abs();
