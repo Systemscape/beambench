@@ -4,6 +4,10 @@ Build a desktop antenna-measurement rig out of four ESP32-C3 boards and a motori
 
 Hardware, firmware, and the PC app are all open source.
 
+> ⚠️ **Disclaimer — proof of concept**
+>
+> This entire project was written with [Claude Code](https://claude.com/claude-code) and has **not yet undergone any proper code review**. It exists purely as a proof of concept for demo purposes. Do not rely on it for anything that matters — expect rough edges, missing validation, and untested corners.
+
 ## Screenshot
 
 ![Beambench UI — live polar plot of a completed sweep](docs/ui_screenshot.png)
@@ -99,3 +103,7 @@ cd software/pc && cargo test --features sim    # PC unit + integration suite
 ```
 
 The integration suite spins up an in-process **bridge simulator** that generates synthetic cardioid RSSI data — useful for testing the whole pipeline without flashing anything.
+
+## License
+
+Released under the [MIT License](LICENSE). © 2026 Systemscape GmbH.
