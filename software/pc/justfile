@@ -1,8 +1,15 @@
 default:
     just --list
 
+# Install frontend dependencies if node_modules is missing
+install:
+    #!/usr/bin/env bash
+    if [ ! -d frontend/node_modules ]; then
+        cd frontend && pnpm install
+    fi
+
 # Development: run Axum backend + Vite dev server
-dev:
+dev: install
     #!/usr/bin/env bash
     cd frontend && pnpm run dev &
     VITE_PID=$!
@@ -10,12 +17,12 @@ dev:
     kill $VITE_PID 2>/dev/null
 
 # Build for release: compile Svelte to static files, build Rust binary
-build:
+build: install
     cd frontend && pnpm run build
     cargo build --bin beambench-pc --release
 
 # Run release build (serves embedded frontend)
-run:
+run: build
     cargo run --release
 
 # Run RX simulator
@@ -39,9 +46,9 @@ test-all:
     cargo test --features sim
 
 # Format frontend code with Prettier
-format:
+format: install
     cd frontend && pnpm run format
 
 # Lint frontend code with ESLint
-lint:
+lint: install
     cd frontend && pnpm run lint
