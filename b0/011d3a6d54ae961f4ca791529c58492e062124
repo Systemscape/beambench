@@ -1,0 +1,23 @@
+software/pc/justfile
+  1cd3ea577116e397 4-10,12,20,25,49,53
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.4",
+  "base_commit_sha": "b0011d3a6d54ae961f4ca791529c58492e062124",
+  "prompts": {
+    "1cd3ea577116e397": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a6886980-0341-4b83-9f5e-def523a6ad87",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "JuliDi",
+      "messages": [],
+      "total_additions": 59,
+      "total_deletions": 22,
+      "accepted_lines": 37,
+      "overriden_lines": 7
+    }
+  }
+}
