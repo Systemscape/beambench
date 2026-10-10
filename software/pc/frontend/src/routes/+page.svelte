@@ -81,7 +81,8 @@
     /** Client-side mirror of SweepConfig::validate(). */
     let configError: string | null = $derived.by(() => {
         if (stepDeg <= 0) return 'Step size must be positive';
-        if (startDeg >= stopDeg) return 'Start angle must be less than stop angle';
+        if (startDeg >= stopDeg)
+            return 'Start angle must be less than stop angle';
         if (samplesPerAngle < 1) return 'Samples per angle must be at least 1';
         return null;
     });
@@ -154,8 +155,12 @@
                 addLog(`Turntable at ${event.angle_deg.toFixed(1)}°`);
                 break;
             case 'OtaProgress': {
-                const pct = Math.floor(event.chunks_sent / event.total_chunks * 100);
-                addLog(`OTA progress: ${pct}% (${event.chunks_sent}/${event.total_chunks} chunks)`);
+                const pct = Math.floor(
+                    (event.chunks_sent / event.total_chunks) * 100
+                );
+                addLog(
+                    `OTA progress: ${pct}% (${event.chunks_sent}/${event.total_chunks} chunks)`
+                );
                 break;
             }
             case 'OtaFinished':
@@ -273,10 +278,16 @@
         if (activeData.length > 0) {
             const activeColor = COLORS[(nextId - 1) % COLORS.length];
             traces.push(
-                buildTrace(activeData, floor, `Sweep ${nextId} (active)`, activeColor, {
-                    lineWidth: 2,
-                    markerSize: 4
-                })
+                buildTrace(
+                    activeData,
+                    floor,
+                    `Sweep ${nextId} (active)`,
+                    activeColor,
+                    {
+                        lineWidth: 2,
+                        markerSize: 4
+                    }
+                )
             );
         }
 
@@ -381,7 +392,7 @@
         setter: (v: number) => void,
         min: number,
         max: number,
-        invert = false,
+        invert = false
     ) {
         e.preventDefault();
         const target = e.currentTarget as HTMLElement;
@@ -391,7 +402,12 @@
 
         function onMove(ev: PointerEvent) {
             const delta = (axis === 'x' ? ev.clientX : ev.clientY) - startPos;
-            setter(Math.min(max, Math.max(min, startVal + (invert ? -delta : delta))));
+            setter(
+                Math.min(
+                    max,
+                    Math.max(min, startVal + (invert ? -delta : delta))
+                )
+            );
         }
         function onUp() {
             target.removeEventListener('pointermove', onMove);
@@ -407,8 +423,12 @@
 
         ws = createWsConnection(
             handleEvent,
-            () => { wsConnected = true; },
-            () => { wsConnected = false; }
+            () => {
+                wsConnected = true;
+            },
+            () => {
+                wsConnected = false;
+            }
         );
 
         await fetchPorts();
@@ -423,7 +443,9 @@
     <h1>Beambench</h1>
 
     {#if !wsConnected}
-        <div class="ws-disconnected">Server connection lost — reconnecting&hellip;</div>
+        <div class="ws-disconnected">
+            Server connection lost — reconnecting&hellip;
+        </div>
     {/if}
 
     {#if errorMessage}
@@ -481,7 +503,8 @@
                 </div>
                 {#if status.backend_name}
                     <p class="backend-info">
-                        Backend: <strong>{status.backend_name}</strong>{#if status.backend_freq_mhz}
+                        Backend: <strong>{status.backend_name}</strong
+                        >{#if status.backend_freq_mhz}
                             &nbsp;({status.backend_freq_mhz}&nbsp;MHz){/if}
                     </p>
                 {/if}
@@ -491,31 +514,49 @@
                 <h2>Turntable</h2>
                 <p class="info" style="margin-top: 0">
                     Position: <strong>{turntableAngle.toFixed(1)}&deg;</strong>
-                    {#if jogging}<span class="jog-indicator"> (moving...)</span>{/if}
+                    {#if jogging}<span class="jog-indicator">
+                            (moving...)</span
+                        >{/if}
                 </p>
                 <div class="jog-row">
                     <button
                         class="secondary"
                         onclick={() => jog(-10)}
-                        disabled={!status.serial_connected || !status.turntable_connected || status.sweeping || homing || jogging}>
+                        disabled={!status.serial_connected ||
+                            !status.turntable_connected ||
+                            status.sweeping ||
+                            homing ||
+                            jogging}>
                         &minus;10&deg;
                     </button>
                     <button
                         class="secondary"
                         onclick={() => jog(-1)}
-                        disabled={!status.serial_connected || !status.turntable_connected || status.sweeping || homing || jogging}>
+                        disabled={!status.serial_connected ||
+                            !status.turntable_connected ||
+                            status.sweeping ||
+                            homing ||
+                            jogging}>
                         &minus;1&deg;
                     </button>
                     <button
                         class="secondary"
                         onclick={() => jog(1)}
-                        disabled={!status.serial_connected || !status.turntable_connected || status.sweeping || homing || jogging}>
+                        disabled={!status.serial_connected ||
+                            !status.turntable_connected ||
+                            status.sweeping ||
+                            homing ||
+                            jogging}>
                         +1&deg;
                     </button>
                     <button
                         class="secondary"
                         onclick={() => jog(10)}
-                        disabled={!status.serial_connected || !status.turntable_connected || status.sweeping || homing || jogging}>
+                        disabled={!status.serial_connected ||
+                            !status.turntable_connected ||
+                            status.sweeping ||
+                            homing ||
+                            jogging}>
                         +10&deg;
                     </button>
                 </div>
@@ -523,7 +564,11 @@
                     <button
                         class="secondary"
                         onclick={returnHome}
-                        disabled={!status.serial_connected || !status.turntable_connected || status.sweeping || homing || jogging}>
+                        disabled={!status.serial_connected ||
+                            !status.turntable_connected ||
+                            status.sweeping ||
+                            homing ||
+                            jogging}>
                         {homing ? 'Homing...' : 'Return Home'}
                     </button>
                 </div>
@@ -541,15 +586,20 @@
                         <button
                             class="secondary small-btn"
                             onclick={applyTransmissionRatio}
-                            disabled={status.sweeping || homing || jogging
-                                || Number(transmissionRatioInput) === status.transmission_ratio
-                                || !(Number(transmissionRatioInput) > 0)}>
+                            disabled={status.sweeping ||
+                                homing ||
+                                jogging ||
+                                Number(transmissionRatioInput) ===
+                                    status.transmission_ratio ||
+                                !(Number(transmissionRatioInput) > 0)}>
                             Apply
                         </button>
                     </div>
                     <p class="info" style="margin-top: 0.35rem">
                         Active: 1:{status.transmission_ratio}
-                        &mdash; e.g. 10° turntable = {(10 * status.transmission_ratio).toFixed(1)}° motor
+                        &mdash; e.g. 10° turntable = {(
+                            10 * status.transmission_ratio
+                        ).toFixed(1)}° motor
                     </p>
                 </div>
             </section>
@@ -589,7 +639,10 @@
                 <div class="connect-row">
                     <button
                         onclick={startSweep}
-                        disabled={!status.serial_connected || status.sweeping || homing || !!configError}>
+                        disabled={!status.serial_connected ||
+                            status.sweeping ||
+                            homing ||
+                            !!configError}>
                         Start Sweep
                     </button>
                     <button
@@ -601,7 +654,9 @@
                 </div>
                 <p class="info">
                     {#if status.sweeping && currentAngle !== null}
-                        {activeData.length} points &mdash; {currentAngle.toFixed(1)}&deg;
+                        {activeData.length} points &mdash; {currentAngle.toFixed(
+                            1
+                        )}&deg;
                     {:else}
                         {activeData.length} data points
                     {/if}
@@ -662,24 +717,46 @@
                             measurements.length === 0}>Download CSV</button>
                 </a>
             </section>
-
         </div>
 
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
             class="resize-handle-h"
-            onpointerdown={(e) => startResize(e, 'x', () => sidebarWidth, (v) => { sidebarWidth = v; }, 200, 500)}
-        ></div>
+            onpointerdown={(e) =>
+                startResize(
+                    e,
+                    'x',
+                    () => sidebarWidth,
+                    (v) => {
+                        sidebarWidth = v;
+                    },
+                    200,
+                    500
+                )}>
+        </div>
 
-        <div class="main-area" style="grid-template-rows: 1fr 6px {logHeight}px">
+        <div
+            class="main-area"
+            style="grid-template-rows: 1fr 6px {logHeight}px">
             <div class="plot-wrapper">
                 <div bind:this={plotDiv} style="width:100%;height:100%"></div>
             </div>
             <!-- svelte-ignore a11y_no_static_element_interactions -->
             <div
                 class="resize-handle-v"
-                onpointerdown={(e) => startResize(e, 'y', () => logHeight, (v) => { logHeight = v; }, 60, 600, true)}
-            ></div>
+                onpointerdown={(e) =>
+                    startResize(
+                        e,
+                        'y',
+                        () => logHeight,
+                        (v) => {
+                            logHeight = v;
+                        },
+                        60,
+                        600,
+                        true
+                    )}>
+            </div>
             <section class="log-section">
                 <h2>Log</h2>
                 <div class="log" bind:this={logDiv}>
@@ -1062,5 +1139,4 @@
         color: #ffa726;
         font-style: italic;
     }
-
 </style>
