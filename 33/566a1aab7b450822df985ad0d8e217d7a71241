@@ -1,0 +1,33 @@
+software/pc/frontend/src/routes/+page.svelte
+  s_a799c32e2ee528::t_1fe62ab341f87e 292
+  s_a799c32e2ee528::t_1ba375bfe8442a 309,314-316,320-322
+  s_a799c32e2ee528::t_4ffccff75d4d45 24-25
+  s_a799c32e2ee528::t_1e07e77ba0d347 111
+  s_a799c32e2ee528::t_6706d25a5c8124 433,441,457
+  s_a799c32e2ee528::t_93ae35b6bce1ac 246-250,252,255-257
+  s_a799c32e2ee528::t_4e03053e59f348 19-20
+  s_a799c32e2ee528::t_61f799bbb0af66 206-207,211-216
+  s_a799c32e2ee528::t_41f6a52ffb7996 208-210,434-436,719-720
+  s_a799c32e2ee528::t_d19850698f8b20 803-804,815,822,828,838,871,886-887,899,907,909-910,917,932,934-935,942-943,952-953,957-959,963,980-982,986-988,993,999,1005,1021-1022,1033,1054,1063,1094,1122,1128,1160
+  s_a799c32e2ee528::t_bb13449f187b3f 286-288,437
+software/pc/frontend/src/app.css
+  s_a799c32e2ee528::t_14595db329d6b5 1-68
+software/pc/frontend/src/routes/+layout.svelte
+  s_a799c32e2ee528::t_7fdf2d1f616049 2
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "33566a1aab7b450822df985ad0d8e217d7a71241",
+  "prompts": {},
+  "sessions": {
+    "s_a799c32e2ee528": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "31711af6-aa61-4b1f-b361-a23ccbaac68b",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "JuliDi <julian@systemscape.de>"
+    }
+  }
+}
