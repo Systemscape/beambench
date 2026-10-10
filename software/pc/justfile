@@ -37,6 +37,14 @@ check:
 test:
     cargo test --lib
 
+# Generate TypeScript bindings (frontend/src/lib/bindings.ts) from Rust types
+gen-types:
+    cargo test --lib export_bindings
+
+# Fail if committed TypeScript bindings are out of date
+check-types: gen-types
+    git diff --exit-code frontend/src/lib/bindings.ts
+
 # Run integration tests (requires sim feature)
 test-integration:
     cargo test --test integration --features sim
