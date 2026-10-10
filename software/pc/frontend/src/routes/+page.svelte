@@ -16,18 +16,13 @@
         id: number;
         name: string;
         data: DataPoint[];
-        color: string;
+        /** Index into the `--trace-N` palette in app.css. */
+        colorIdx: number;
         visible: boolean;
     };
 
-    const COLORS = [
-        '#fff',
-        '#4fc3f7',
-        '#ff8a65',
-        '#81c784',
-        '#ce93d8',
-        '#fff176'
-    ];
+    /** Number of `--trace-N` colors defined in app.css. */
+    const TRACE_COLORS = 6;
 
     let measurements: Measurement[] = $state([]);
     let activeData: DataPoint[] = $state([]);
@@ -113,7 +108,7 @@
                 id: nextId,
                 name: `Sweep ${nextId}`,
                 data: activeData,
-                color: COLORS[(nextId - 1) % COLORS.length],
+                colorIdx: (nextId - 1) % TRACE_COLORS,
                 visible: true
             }
         ];
@@ -208,6 +203,17 @@
         updatePlot();
     });
 
+    /** Read a theme token from app.css (Plotly needs literal colors). */
+    function cssVar(name: string): string {
+        return getComputedStyle(document.documentElement)
+            .getPropertyValue(name)
+            .trim();
+    }
+
+    function traceColor(idx: number): string {
+        return cssVar(`--trace-${idx}`);
+    }
+
     /** Build a Plotly scatterpolar trace object from data points. */
     function buildTrace(
         data: DataPoint[],
@@ -237,13 +243,18 @@
         }
         allVisible.push(...activeData);
 
+        const textDim = cssVar('--text-dim');
+        const gridColor = cssVar('--plot-grid');
+        const axisColor = cssVar('--plot-axis');
+        const surface = cssVar('--surface');
+
         let radialaxis: Record<string, unknown> = {
-            title: { text: 'RSSI (dBm)', font: { color: '#888' } },
+            title: { text: 'RSSI (dBm)', font: { color: textDim } },
             angle: 90,
             tickangle: 90,
-            gridcolor: '#2a2a2a',
-            linecolor: '#333',
-            tickfont: { color: '#666' }
+            gridcolor: gridColor,
+            linecolor: axisColor,
+            tickfont: { color: textDim }
         };
 
         let floor = 0;
@@ -272,11 +283,13 @@
 
         for (const m of measurements) {
             if (!m.visible) continue;
-            traces.push(buildTrace(m.data, floor, m.name, m.color));
+            traces.push(
+                buildTrace(m.data, floor, m.name, traceColor(m.colorIdx))
+            );
         }
 
         if (activeData.length > 0) {
-            const activeColor = COLORS[(nextId - 1) % COLORS.length];
+            const activeColor = traceColor((nextId - 1) % TRACE_COLORS);
             traces.push(
                 buildTrace(
                     activeData,
@@ -293,20 +306,20 @@
 
         const layout = {
             polar: {
-                bgcolor: '#1a1a1a',
+                bgcolor: surface,
                 radialaxis,
                 angularaxis: {
                     direction: 'clockwise' as const,
                     period: 360,
-                    gridcolor: '#2a2a2a',
-                    linecolor: '#333',
-                    tickfont: { color: '#666' }
+                    gridcolor: gridColor,
+                    linecolor: axisColor,
+                    tickfont: { color: textDim }
                 }
             },
             showlegend: traces.length > 1,
-            legend: { font: { color: '#888' } },
-            paper_bgcolor: '#1a1a1a',
-            plot_bgcolor: '#1a1a1a',
+            legend: { font: { color: textDim } },
+            paper_bgcolor: surface,
+            plot_bgcolor: surface,
             margin: { t: 40, b: 40, l: 40, r: 40 }
         };
 
@@ -417,9 +430,15 @@
         target.addEventListener('pointerup', onUp);
     }
 
+    // Plotly colors are read from CSS once per render; redraw when the OS theme changes.
+    const colorScheme = globalThis.matchMedia?.(
+        '(prefers-color-scheme: light)'
+    );
+
     onMount(async () => {
         Plotly = await import('plotly.js-dist-min');
         updatePlot();
+        colorScheme?.addEventListener('change', updatePlot);
 
         ws = createWsConnection(
             handleEvent,
@@ -435,6 +454,7 @@
     });
 
     onDestroy(() => {
+        colorScheme?.removeEventListener('change', updatePlot);
         ws?.close();
     });
 </script>
@@ -696,7 +716,8 @@
                                             toggleMeasurement(m.id)} />
                                     <span
                                         class="color-dot"
-                                        style="background: {m.color}"></span>
+                                        style="background: var(--trace-{m.colorIdx})"
+                                    ></span>
                                     {m.name}
                                 </label>
                                 <button
@@ -779,8 +800,8 @@
             system-ui,
             -apple-system,
             sans-serif;
-        background: #111;
-        color: #eee;
+        background: var(--bg);
+        color: var(--text);
     }
 
     main {
@@ -791,20 +812,20 @@
         margin: 0 0 1.25rem;
         font-size: 1.4rem;
         font-weight: 600;
-        color: #fff;
+        color: var(--text);
     }
 
     h2 {
         margin: 0 0 0.75rem;
         font-size: 0.75rem;
         font-weight: 600;
-        color: #aaa;
+        color: var(--text-muted);
         text-transform: uppercase;
         letter-spacing: 0.08em;
     }
 
     .ws-disconnected {
-        background: #e65100;
+        background: var(--warning);
         color: white;
         padding: 0.5rem 1rem;
         border-radius: 4px;
@@ -814,7 +835,7 @@
     }
 
     .error {
-        background: #d32f2f;
+        background: var(--danger-banner);
         color: white;
         padding: 0.5rem 1rem;
         border-radius: 4px;
@@ -847,7 +868,7 @@
 
     .resize-handle-h:hover,
     .resize-handle-h:active {
-        background: #444;
+        background: var(--border);
         border-radius: 3px;
     }
 
@@ -862,8 +883,8 @@
     }
 
     section {
-        background: #1a1a1a;
-        border: 1.5px solid #3a3a3a;
+        background: var(--surface);
+        border: 1.5px solid var(--border);
         border-radius: 6px;
         padding: 1rem;
     }
@@ -875,7 +896,7 @@
     .field label {
         display: block;
         font-size: 0.8rem;
-        color: #aaa;
+        color: var(--text-muted);
         margin-bottom: 0.25rem;
     }
 
@@ -883,17 +904,17 @@
     select {
         width: 100%;
         padding: 0.45rem 0.5rem;
-        border: 1.5px solid #444;
+        border: 1.5px solid var(--border);
         border-radius: 4px;
-        background: #222;
-        color: #eee;
+        background: var(--surface-2);
+        color: var(--text);
         font-size: 0.85rem;
         box-sizing: border-box;
     }
 
     input:focus {
         outline: none;
-        border-color: #666;
+        border-color: var(--border-focus);
     }
 
     .connect-row {
@@ -908,18 +929,18 @@
 
     button {
         padding: 0.5rem 1rem;
-        border: 1.5px solid #555;
+        border: 1.5px solid var(--border-strong);
         border-radius: 4px;
-        background: #222;
-        color: #eee;
+        background: var(--surface-2);
+        color: var(--text);
         cursor: pointer;
         font-size: 0.85rem;
         width: 100%;
     }
 
     button:hover:not(:disabled) {
-        background: #333;
-        border-color: #777;
+        background: var(--surface-hover);
+        border-color: var(--border-focus);
     }
 
     button:disabled {
@@ -928,18 +949,18 @@
     }
 
     button.secondary {
-        color: #bbb;
-        border-color: #444;
+        color: var(--text-muted);
+        border-color: var(--border);
     }
 
     button.danger {
-        background: #222;
-        color: #e53935;
-        border-color: #e53935;
+        background: var(--surface-2);
+        color: var(--danger);
+        border-color: var(--danger);
     }
 
     button.danger:hover {
-        background: #2a1010;
+        background: var(--danger-hover);
     }
 
     .button-row {
@@ -956,32 +977,32 @@
         font-size: 0.7rem;
         padding: 0.2rem 0.5rem;
         border-radius: 3px;
-        background: #222;
-        border: 1.5px solid #444;
-        color: #777;
+        background: var(--surface-2);
+        border: 1.5px solid var(--border);
+        color: var(--text-dim);
     }
 
     .indicator.active {
-        background: #111;
-        border-color: #4caf50;
-        color: #4caf50;
+        background: var(--bg);
+        border-color: var(--success);
+        color: var(--success);
     }
 
     .backend-info {
         font-size: 0.75rem;
-        color: #888;
+        color: var(--text-dim);
         margin: 0.5rem 0 0;
     }
 
     .validation-error {
         font-size: 0.8rem;
-        color: #e53935;
+        color: var(--danger);
         margin: 0.25rem 0;
     }
 
     .info {
         font-size: 0.8rem;
-        color: #999;
+        color: var(--text-dim);
         margin: 0.5rem 0 0;
     }
 
@@ -997,8 +1018,8 @@
         min-height: 0;
         min-width: 0;
         overflow: hidden;
-        background: #1a1a1a;
-        border: 1.5px solid #3a3a3a;
+        background: var(--surface);
+        border: 1.5px solid var(--border);
         border-radius: 6px;
     }
 
@@ -1009,7 +1030,7 @@
 
     .resize-handle-v:hover,
     .resize-handle-v:active {
-        background: #444;
+        background: var(--border);
         border-radius: 3px;
     }
 
@@ -1030,7 +1051,7 @@
         font-family: monospace;
         font-size: 0.75rem;
         line-height: 1.5;
-        color: #bbb;
+        color: var(--text-muted);
     }
 
     .log-entry {
@@ -1039,7 +1060,7 @@
     }
 
     .log-ts {
-        color: #777;
+        color: var(--text-dim);
     }
 
     .measurements-header {
@@ -1070,7 +1091,7 @@
         align-items: center;
         gap: 0.4rem;
         font-size: 0.8rem;
-        color: #ddd;
+        color: var(--text);
         cursor: pointer;
     }
 
@@ -1098,13 +1119,13 @@
         font-size: 1rem;
         width: auto;
         line-height: 1;
-        color: #888;
+        color: var(--text-dim);
         border: none;
         background: transparent;
     }
 
     .icon-btn:hover {
-        color: #e53935;
+        color: var(--danger);
         background: transparent;
     }
 
@@ -1136,7 +1157,7 @@
     }
 
     .jog-indicator {
-        color: #ffa726;
+        color: var(--jog);
         font-style: italic;
     }
 </style>

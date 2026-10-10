@@ -1,0 +1,68 @@
+/* Theme tokens. Dark is the default; light follows the OS preference. */
+:root {
+    color-scheme: dark;
+
+    --bg: #111;
+    --surface: #1a1a1a;
+    --surface-2: #222;
+    --surface-hover: #333;
+    --border: #444;
+    --border-strong: #555;
+    --border-focus: #777;
+
+    --text: #eee;
+    --text-muted: #aaa;
+    --text-dim: #888;
+
+    --plot-grid: #2a2a2a;
+    --plot-axis: #333;
+
+    --danger: #e53935;
+    --danger-banner: #d32f2f;
+    --danger-hover: #2a1010;
+    --warning: #e65100;
+    --success: #4caf50;
+    --jog: #ffa726;
+
+    --trace-0: #fff;
+    --trace-1: #4fc3f7;
+    --trace-2: #ff8a65;
+    --trace-3: #81c784;
+    --trace-4: #ce93d8;
+    --trace-5: #fff176;
+}
+
+@media (prefers-color-scheme: light) {
+    :root {
+        color-scheme: light;
+
+        --bg: #f4f4f5;
+        --surface: #fff;
+        --surface-2: #fafafa;
+        --surface-hover: #ebebeb;
+        --border: #d4d4d8;
+        --border-strong: #bdbdc2;
+        --border-focus: #8e8e93;
+
+        --text: #1c1c1e;
+        --text-muted: #52525b;
+        --text-dim: #8e8e93;
+
+        --plot-grid: #e4e4e7;
+        --plot-axis: #c8c8cc;
+
+        --danger: #d32f2f;
+        --danger-banner: #d32f2f;
+        --danger-hover: #fdecea;
+        --warning: #e65100;
+        --success: #2e7d32;
+        --jog: #ef6c00;
+
+        --trace-0: #212121;
+        --trace-1: #0288d1;
+        --trace-2: #e64a19;
+        --trace-3: #2e7d32;
+        --trace-4: #7b1fa2;
+        --trace-5: #f9a825;
+    }
+}
