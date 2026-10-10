@@ -1,0 +1,14 @@
+software/pc/frontend/pnpm-workspace.yaml
+  h_2e4fad1f0ddac3 1-2
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "55e6943bbc0c9fa2e997d9e3038bcb2f679d6be3",
+  "prompts": {},
+  "humans": {
+    "h_2e4fad1f0ddac3": {
+      "author": "JuliDi <julian@systemscape.de>"
+    }
+  }
+}
