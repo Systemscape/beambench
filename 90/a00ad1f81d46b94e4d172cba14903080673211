@@ -1,0 +1,20 @@
+software/pc/frontend/src/routes/+page.svelte
+  s_a799c32e2ee528::t_41f6a52ffb7996 289,406-410,426-431,446-448,506-507,517-519,525-529,535-539,545-549,555-559,567-571,589-594,600-602,642-645,657-659,725-736,738
+  s_a799c32e2ee528::t_0775cbd32bcdac 84-85,158-163,281-288,290,395,405,739-740,747-759
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "90a00ad1f81d46b94e4d172cba14903080673211",
+  "prompts": {},
+  "sessions": {
+    "s_a799c32e2ee528": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "31711af6-aa61-4b1f-b361-a23ccbaac68b",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "JuliDi <julian@systemscape.de>"
+    }
+  }
+}
