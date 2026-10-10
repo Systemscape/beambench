@@ -48,5 +48,8 @@ heapless = "0.9.2"
 # SHA-256 for OTA firmware verification
 sha2 = "0.10"
 
+# Generate TypeScript bindings for WebSocket types (see `just gen-types`)
+ts-rs = "12"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

@@ -10,17 +10,23 @@ pub mod sim;
 pub mod sweep;
 
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 /// A single measurement data point.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings.ts")]
 pub struct DataPoint {
+    /// Turntable angle in degrees.
     pub angle_deg: f32,
+    /// Averaged RSSI in dBm (negative; closer to 0 = stronger).
     pub rssi_dbm: f32,
+    /// Number of raw RSSI samples averaged into this reading.
     pub sample_count: u16,
 }
 
 /// Sweep configuration sent from UI to backend.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings.ts")]
 pub struct SweepConfig {
     pub start_deg: f32,
     pub stop_deg: f32,
@@ -29,7 +35,8 @@ pub struct SweepConfig {
 }
 
 /// TX configuration.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings.ts")]
 pub struct TxConfig {
     pub channel: u8,
     pub tx_power_dbm: i8,
@@ -45,7 +52,8 @@ pub struct TxConfig {
 pub const DEFAULT_TRANSMISSION_RATIO: f32 = 3.0;
 
 /// Current system status broadcast to all WebSocket clients on state changes.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings.ts")]
 pub struct SystemStatus {
     /// Whether an antenna pattern sweep is in progress.
     pub sweeping: bool,
@@ -68,14 +76,18 @@ pub struct SystemStatus {
 }
 
 /// Serial port information returned by the list_ports endpoint.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings.ts")]
 pub struct PortInfo {
+    /// OS device path (e.g. `/dev/ttyUSB0` or `COM3`).
     pub name: String,
+    /// Human-readable description from the USB descriptor.
     pub description: String,
 }
 
 /// Events pushed to the frontend over WebSocket.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings.ts")]
 #[serde(tag = "type")]
 pub enum WsEvent {
     /// A new measurement data point arrived during a sweep.
@@ -99,7 +111,8 @@ pub enum WsEvent {
 }
 
 /// Commands received from the frontend over WebSocket.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings.ts")]
 #[serde(tag = "type")]
 pub enum WsCommand {
     /// Start a new antenna pattern sweep with the given configuration.

@@ -1,105 +1,14 @@
 /** WebSocket client for communicating with the Axum backend. */
 
-/** A single RSSI measurement at a given turntable angle. */
-export type DataPoint = {
-    /** Turntable angle in degrees. */
-    angle_deg: number;
-    /** Averaged RSSI reading in dBm (negative values; closer to 0 = stronger). */
-    rssi_dbm: number;
-    /** Number of raw RSSI samples averaged into this reading. */
-    sample_count: number;
-};
-
-/** Snapshot of the system's connection and sweep state, sent periodically by the backend. */
-export type SystemStatus = {
-    /** Whether a sweep is currently in progress. */
-    sweeping: boolean;
-    /** Whether the TX (transmitter) ESP32 is paired via ESP-NOW. */
-    tx_connected: boolean;
-    /** Whether the RX (receiver) ESP32 is paired via ESP-NOW. */
-    rx_connected: boolean;
-    /** Whether the turntable ESP32 is paired via ESP-NOW. */
-    turntable_connected: boolean;
-    /** Whether the PC is connected to the Bridge over serial. */
-    serial_connected: boolean;
-    /** Total data points collected in the current session. */
-    data_points: number;
-    /** Active RF measurement backend name (e.g. "espnow", "dect-nr+"). */
-    backend_name: string;
-    /** Carrier frequency in MHz, if applicable. */
-    backend_freq_mhz: number | null;
-    /** Motor-to-turntable gear ratio (motor_deg = turntable_deg × ratio). */
-    transmission_ratio: number;
-};
-
-/** A serial port available on the host machine. */
-export type PortInfo = {
-    /** OS device path (e.g. `/dev/ttyUSB0` or `COM3`). */
-    name: string;
-    /** Human-readable description from the USB descriptor. */
-    description: string;
-};
-
-/**
- * Server-to-client WebSocket events.
- *
- * The backend pushes these as JSON over the `/ws` endpoint.
- */
-export type WsEvent =
-    | {
-          type: 'DataPoint';
-          angle_deg: number;
-          rssi_dbm: number;
-          sample_count: number;
-      }
-    | { type: 'SweepComplete' }
-    | { type: 'HomeComplete' }
-    | { type: 'JogComplete'; angle_deg: number }
-    | {
-          type: 'Status';
-          sweeping: boolean;
-          tx_connected: boolean;
-          rx_connected: boolean;
-          turntable_connected: boolean;
-          serial_connected: boolean;
-          data_points: number;
-          backend_name: string;
-          backend_freq_mhz: number | null;
-          transmission_ratio: number;
-      }
-    | { type: 'OtaProgress'; chunks_sent: number; total_chunks: number }
-    | { type: 'OtaFinished' }
-    | { type: 'Error'; message: string }
-    | { type: 'Log'; message: string };
-
-/**
- * Client-to-server WebSocket commands.
- *
- * Sent as JSON to the `/ws` endpoint to control the measurement system.
- */
-export type WsCommand =
-    | {
-          type: 'StartSweep';
-          start_deg: number;
-          stop_deg: number;
-          step_deg: number;
-          samples_per_angle: number;
-      }
-    | {
-          type: 'ConfigureTx';
-          channel: number;
-          tx_power_dbm: number;
-          packet_rate_hz: number;
-      }
-    | { type: 'Stop' }
-    | { type: 'QueryStatus' }
-    | { type: 'ListPorts' }
-    | { type: 'Connect'; port: string }
-    | { type: 'Disconnect' }
-    | { type: 'ExportCsv' }
-    | { type: 'ReturnHome' }
-    | { type: 'Jog'; delta_deg: number }
-    | { type: 'SetTransmissionRatio'; ratio: number };
+// Types are generated from the Rust definitions in src/lib.rs (`just gen-types`).
+import type { WsCommand, WsEvent } from './bindings';
+export type {
+    DataPoint,
+    PortInfo,
+    SystemStatus,
+    WsCommand,
+    WsEvent
+} from './bindings';
 
 export function createWsConnection(
     onEvent: (event: WsEvent) => void,
