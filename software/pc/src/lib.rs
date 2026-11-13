@@ -137,7 +137,10 @@ pub enum WsCommand {
     Jog { delta_deg: f32 },
     /// Start an OTA firmware update for the specified target device.
     /// Target is "rx", "tx", "turntable", or "bridge".
-    OtaUpload { target: String, firmware_path: String },
+    OtaUpload {
+        target: String,
+        firmware_path: String,
+    },
     /// Set the motor-to-turntable gear ratio (motor_deg = turntable_deg × ratio).
     SetTransmissionRatio { ratio: f32 },
 }
@@ -162,7 +165,10 @@ impl SweepConfig {
 pub fn export_csv(data: &[DataPoint]) -> String {
     let mut csv = String::from("angle_deg,rssi_dbm,sample_count\n");
     for dp in data {
-        csv.push_str(&format!("{},{},{}\n", dp.angle_deg, dp.rssi_dbm, dp.sample_count));
+        csv.push_str(&format!(
+            "{},{},{}\n",
+            dp.angle_deg, dp.rssi_dbm, dp.sample_count
+        ));
     }
     csv
 }
@@ -202,7 +208,9 @@ mod tests {
 
     // ── JSON round-trip tests ───────────────────────────────────────────
 
-    fn json_round_trip<T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug>(
+    fn json_round_trip<
+        T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+    >(
         val: &T,
     ) {
         let json = serde_json::to_string(val).expect("serialize");

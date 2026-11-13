@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use beambench_protocol::{DecodeError, DeviceEvent, PcCommand, PROTOCOL_VERSION};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{mpsc, Mutex};
 use tokio_serial::SerialPortBuilderExt;
 use tracing::{debug, error, info, warn};
 
@@ -266,7 +266,10 @@ mod tests {
         writer.write_all(&frame).await.unwrap();
         drop(writer);
 
-        let decoded = resp_rx.recv().await.expect("should receive decoded message");
+        let decoded = resp_rx
+            .recv()
+            .await
+            .expect("should receive decoded message");
         assert_eq!(decoded, msg);
     }
 
@@ -309,7 +312,10 @@ mod tests {
         writer.write_all(&frame[mid..]).await.unwrap();
         drop(writer);
 
-        let decoded = resp_rx.recv().await.expect("should reassemble fragmented frame");
+        let decoded = resp_rx
+            .recv()
+            .await
+            .expect("should reassemble fragmented frame");
         assert_eq!(decoded, msg);
     }
 
@@ -333,7 +339,10 @@ mod tests {
         writer.write_all(&frame).await.unwrap();
         drop(writer);
 
-        let decoded = resp_rx.recv().await.expect("should decode frame after reset");
+        let decoded = resp_rx
+            .recv()
+            .await
+            .expect("should decode frame after reset");
         assert_eq!(decoded, msg);
     }
 

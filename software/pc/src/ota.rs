@@ -51,9 +51,9 @@
 
 use std::sync::Arc;
 
-use beambench_protocol::{DeviceEvent, OTA_CHUNK_SIZE, PcCommand, Role};
+use beambench_protocol::{DeviceEvent, PcCommand, Role, OTA_CHUNK_SIZE};
 use sha2::{Digest, Sha256};
-use tokio::sync::{Mutex, broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, Mutex};
 
 use crate::WsEvent;
 
@@ -204,9 +204,11 @@ pub async fn stream_firmware(
             }
 
             // Wait for the batch ack.
-            match wait_for(&mut rx, OTA_WINDOW_TIMEOUT, |e| {
-                matches!(e, DeviceEvent::OtaAck { seq } if *seq == expected_ack_seq)
-            })
+            match wait_for(
+                &mut rx,
+                OTA_WINDOW_TIMEOUT,
+                |e| matches!(e, DeviceEvent::OtaAck { seq } if *seq == expected_ack_seq),
+            )
             .await
             {
                 Ok(()) => {

@@ -183,27 +183,41 @@ pub enum EspnowMessage {
     /// Bridge -> RX: stop collecting, report result.
     ReportMeasurement,
     /// RX -> Bridge: measurement result.
-    MeasurementResult { rssi_dbm: f32, sample_count: u16 },
+    MeasurementResult {
+        rssi_dbm: f32,
+        sample_count: u16,
+    },
 
     // OTA firmware update (Bridge ↔ field device)
     /// Bridge -> target: begin OTA update with expected size and hash.
     /// `ack_interval` controls windowed flow control: the target sends an
     /// `OtaAck` every `ack_interval` chunks (and always on the last chunk).
     /// A value of 1 means every chunk is acked (stop-and-wait).
-    OtaBegin { total_size: u32, sha256: [u8; 32], ack_interval: u16 },
+    OtaBegin {
+        total_size: u32,
+        sha256: [u8; 32],
+        ack_interval: u16,
+    },
     /// Target -> Bridge: ready to receive OTA data.
     OtaReady,
     /// Bridge -> target: firmware chunk (max 240 bytes to fit ESP-NOW payload).
-    OtaData { seq: u16, data: Vec<u8, 240> },
+    OtaData {
+        seq: u16,
+        data: Vec<u8, 240>,
+    },
     /// Target -> Bridge: acknowledge receipt of chunk. The PC should not send
     /// more than `ack_interval` chunks beyond the last acked sequence number.
-    OtaAck { seq: u16 },
+    OtaAck {
+        seq: u16,
+    },
     /// Bridge -> target: all chunks sent.
     OtaFinish,
     /// Target -> Bridge: OTA verified and applied, rebooting.
     OtaComplete,
     /// Target -> Bridge: OTA failed.
-    OtaError { description: String<64> },
+    OtaError {
+        description: String<64>,
+    },
 }
 
 // ── Serial protocol v2 (PC ↔ Bridge) ────────────────────────────────────────
@@ -225,7 +239,9 @@ pub enum PcCommand {
     StopTransmitting,
 
     // Turntable control
-    MoveTo { angle_deg: f32 },
+    MoveTo {
+        angle_deg: f32,
+    },
     StopTurntable,
     ReturnHome,
 
@@ -238,11 +254,22 @@ pub enum PcCommand {
 
     // OTA firmware update (PC -> Bridge -> target)
     /// Begin OTA: target role, firmware size, SHA-256 hash, and ack window.
-    OtaBegin { target: Role, total_size: u32, sha256: [u8; 32], ack_interval: u16 },
+    OtaBegin {
+        target: Role,
+        total_size: u32,
+        sha256: [u8; 32],
+        ack_interval: u16,
+    },
     /// Stream a firmware chunk (Bridge relays to target via ESP-NOW).
-    OtaData { target: Role, seq: u16, data: Vec<u8, 240> },
+    OtaData {
+        target: Role,
+        seq: u16,
+        data: Vec<u8, 240>,
+    },
     /// All chunks sent — target should verify and apply.
-    OtaFinish { target: Role },
+    OtaFinish {
+        target: Role,
+    },
 }
 
 /// Event from Bridge to PC (over USB-serial, COBS-framed postcard).
@@ -253,12 +280,19 @@ pub enum DeviceEvent {
     TxAck,
 
     // Turntable responses
-    MoveComplete { angle_deg: f32 },
-    TurntableError { description: String<64> },
+    MoveComplete {
+        angle_deg: f32,
+    },
+    TurntableError {
+        description: String<64>,
+    },
     HomeComplete,
 
     // RX responses
-    Measurement { rssi_dbm: f32, sample_count: u16 },
+    Measurement {
+        rssi_dbm: f32,
+        sample_count: u16,
+    },
 
     // System
     Status {
@@ -269,17 +303,23 @@ pub enum DeviceEvent {
         /// Boards whose frames the bridge dropped because of another protocol version.
         mismatched_peers: Vec<PeerMismatch, MAX_MISMATCHED_PEERS>,
     },
-    Error { description: String<128> },
+    Error {
+        description: String<128>,
+    },
 
     // OTA firmware update (target -> Bridge -> PC)
     /// Target is ready to receive OTA data.
     OtaReady,
     /// Target acknowledged a chunk.
-    OtaAck { seq: u16 },
+    OtaAck {
+        seq: u16,
+    },
     /// OTA verified and applied, target is rebooting.
     OtaComplete,
     /// OTA failed on the target device.
-    OtaError { description: String<64> },
+    OtaError {
+        description: String<64>,
+    },
 }
 
 /// Maximum number of mismatched boards reported in `DeviceEvent::Status`.
@@ -430,8 +470,8 @@ mod test {
 
     use crate::{
         BackendInfo, DecodeError, DeviceEvent, EspnowMessage, HelloBeacon, PairConfirm, PcCommand,
-        PcToRx, PeerMismatch,
-        Role, RxToPc, TurntableCommand, TurntableResponse, TxCommand, TxResponse, MAX_MSG_SIZE,
+        PcToRx, PeerMismatch, Role, RxToPc, TurntableCommand, TurntableResponse, TxCommand,
+        TxResponse, MAX_MSG_SIZE,
     };
 
     /// Serialize `msg` into `buf` with postcard, then deserialize and assert equality.
@@ -520,8 +560,7 @@ mod test {
     ) {
         let len = super::serialize_cobs(msg, buf).expect("COBS serialize failed");
         assert_eq!(buf[len - 1], 0x00, "COBS frame must end with zero byte");
-        let decoded: T =
-            super::deserialize_cobs(&mut buf[..len]).expect("COBS deserialize failed");
+        let decoded: T = super::deserialize_cobs(&mut buf[..len]).expect("COBS deserialize failed");
         assert_eq!(&decoded, msg);
     }
 
@@ -542,7 +581,9 @@ mod test {
     #[test]
     fn version_mismatch_is_not_decoded() {
         let mut buf = [0u8; MAX_MSG_SIZE];
-        let len = super::serialize(&PcCommand::QueryStatus, &mut buf).unwrap().len();
+        let len = super::serialize(&PcCommand::QueryStatus, &mut buf)
+            .unwrap()
+            .len();
         buf[0] = 2;
         assert_eq!(
             super::deserialize::<PcCommand>(&buf[..len]),
@@ -658,14 +699,8 @@ mod test {
             }),
             &mut buf,
         );
-        test_ser_deser(
-            &EspnowMessage::TxCmd(TxCommand::StartTransmit),
-            &mut buf,
-        );
-        test_ser_deser(
-            &EspnowMessage::TxCmd(TxCommand::StopTransmit),
-            &mut buf,
-        );
+        test_ser_deser(&EspnowMessage::TxCmd(TxCommand::StartTransmit), &mut buf);
+        test_ser_deser(&EspnowMessage::TxCmd(TxCommand::StopTransmit), &mut buf);
         test_ser_deser(&EspnowMessage::TxResp(TxResponse::Ack), &mut buf);
         test_ser_deser(
             &EspnowMessage::TxResp(TxResponse::Status {
@@ -719,10 +754,7 @@ mod test {
         let mut buf = [0u8; MAX_MSG_SIZE];
 
         test_cobs_round_trip(&DeviceEvent::TxAck, &mut buf);
-        test_cobs_round_trip(
-            &DeviceEvent::MoveComplete { angle_deg: 90.0 },
-            &mut buf,
-        );
+        test_cobs_round_trip(&DeviceEvent::MoveComplete { angle_deg: 90.0 }, &mut buf);
         test_cobs_round_trip(
             &DeviceEvent::TurntableError {
                 description: String::try_from("stall").unwrap(),
@@ -794,10 +826,7 @@ mod test {
         test_ser_deser(&EspnowMessage::OtaReady, &mut buf);
         test_ser_deser(&EspnowMessage::OtaFinish, &mut buf);
         test_ser_deser(&EspnowMessage::OtaComplete, &mut buf);
-        test_ser_deser(
-            &EspnowMessage::OtaAck { seq: 1000 },
-            &mut buf,
-        );
+        test_ser_deser(&EspnowMessage::OtaAck { seq: 1000 }, &mut buf);
         test_ser_deser(
             &EspnowMessage::OtaError {
                 description: String::try_from("flash write failed").unwrap(),
@@ -808,10 +837,7 @@ mod test {
         // OtaData with max-size payload (240 bytes)
         let mut data = Vec::<u8, 240>::new();
         data.resize(240, 0xFF).unwrap();
-        test_ser_deser(
-            &EspnowMessage::OtaData { seq: 0xFFFF, data },
-            &mut buf,
-        );
+        test_ser_deser(&EspnowMessage::OtaData { seq: 0xFFFF, data }, &mut buf);
     }
 
     #[test]
@@ -1211,10 +1237,8 @@ mod test {
         #[test]
         fn handle_message_ignores_unrelated() {
             let mut state = MeasurementState::new();
-            let resp = state.handle_message(
-                &EspnowMessage::TxCmd(crate::TxCommand::StartTransmit),
-                0,
-            );
+            let resp =
+                state.handle_message(&EspnowMessage::TxCmd(crate::TxCommand::StartTransmit), 0);
             assert!(resp.is_none());
             assert!(!state.is_measuring());
         }
@@ -1290,10 +1314,7 @@ mod test {
         }
 
         /// Helper: do one measurement cycle at an angle. Returns (rssi_dbm, sample_count).
-        fn measure_at_angle(
-            rx: &mut MeasurementState,
-            rssi_samples: &[i32],
-        ) -> (f32, u16) {
+        fn measure_at_angle(rx: &mut MeasurementState, rssi_samples: &[i32]) -> (f32, u16) {
             let msg = route_expect(&PcCommand::StartMeasurement, Role::Rx);
             let resp = rx.handle_message(&msg, 0);
             assert!(resp.is_none());
@@ -1303,10 +1324,15 @@ mod test {
             }
 
             let msg = route_expect(&PcCommand::ReportMeasurement, Role::Rx);
-            let resp = rx.handle_message(&msg, 0).expect("should produce MeasurementResult");
+            let resp = rx
+                .handle_message(&msg, 0)
+                .expect("should produce MeasurementResult");
             let event = translate_response(&resp).expect("should translate");
             match event {
-                DeviceEvent::Measurement { rssi_dbm, sample_count } => (rssi_dbm, sample_count),
+                DeviceEvent::Measurement {
+                    rssi_dbm,
+                    sample_count,
+                } => (rssi_dbm, sample_count),
                 other => panic!("expected Measurement, got {:?}", other),
             }
         }

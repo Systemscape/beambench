@@ -1,24 +1,24 @@
 //! Beambench PC application — Axum server with WebSocket and embedded frontend.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+use std::sync::Arc;
 
 use axum::{
-    Router,
     extract::{
-        Multipart, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
+        Multipart, State,
     },
     response::{IntoResponse, Json},
     routing::{get, post},
+    Router,
 };
 use clap::Parser;
 use rust_embed::Embed;
-use tokio::sync::{Mutex, broadcast, watch};
+use tokio::sync::{broadcast, watch, Mutex};
 use tracing::info;
 
 use beambench_pc::{
-    DEFAULT_TRANSMISSION_RATIO, PortInfo, SystemStatus, WsCommand, WsEvent, export_csv,
+    export_csv, PortInfo, SystemStatus, WsCommand, WsEvent, DEFAULT_TRANSMISSION_RATIO,
 };
 
 /// Initial delay before sending QueryStatus to a freshly-opened device.
@@ -155,7 +155,12 @@ fn spawn_ota(
 ) {
     tokio::spawn(async move {
         match beambench_pc::ota::stream_firmware(
-            &firmware, role, ack_interval, &serial_tx, &serial_rx, &state.ws_tx,
+            &firmware,
+            role,
+            ack_interval,
+            &serial_tx,
+            &serial_rx,
+            &state.ws_tx,
         )
         .await
         {
@@ -277,10 +282,7 @@ async fn export_csv_handler(State(state): State<Arc<AppState>>) -> impl IntoResp
     let data = state.data.lock().await;
     let csv = export_csv(&data);
     (
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "text/csv; charset=utf-8",
-        )],
+        [(axum::http::header::CONTENT_TYPE, "text/csv; charset=utf-8")],
         csv,
     )
 }
@@ -340,15 +342,19 @@ async fn ota_upload(
         message: format!("Starting OTA for {}: {} bytes", target_str, size),
     });
 
-    spawn_ota(state.clone(), firmware, role, ack_interval, serial_tx, serial_rx);
+    spawn_ota(
+        state.clone(),
+        firmware,
+        role,
+        ack_interval,
+        serial_tx,
+        serial_rx,
+    );
 
     Json(serde_json::json!({"ok": true, "size": size}))
 }
 
-async fn ws_handler(
-    ws: WebSocketUpgrade,
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> impl IntoResponse {
     ws.on_upgrade(|socket| handle_ws(socket, state))
 }
 
@@ -361,7 +367,11 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
     // Send current status on connect.
     let status = state.status().await;
     let _ = socket
-        .send(Message::Text(serde_json::to_string(&WsEvent::Status(status)).unwrap().into()))
+        .send(Message::Text(
+            serde_json::to_string(&WsEvent::Status(status))
+                .unwrap()
+                .into(),
+        ))
         .await;
 
     loop {
@@ -456,28 +466,52 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
                     let port_name = port.clone();
                     tokio::spawn(async move {
                         tokio::time::sleep(VERIFY_INITIAL_DELAY).await;
-                        let _ = serial_tx.send(beambench_protocol::PcCommand::QueryStatus).await;
+                        let _ = serial_tx
+                            .send(beambench_protocol::PcCommand::QueryStatus)
+                            .await;
 
-                        let result = tokio::time::timeout(
-                            VERIFY_TIMEOUT,
-                            async {
-                                let mut rx = serial_rx.lock().await;
-                                rx.recv().await
-                            },
-                        )
+                        let result = tokio::time::timeout(VERIFY_TIMEOUT, async {
+                            let mut rx = serial_rx.lock().await;
+                            rx.recv().await
+                        })
                         .await;
 
                         match result {
-                            Ok(Some(beambench_protocol::DeviceEvent::Status { tx_connected, rx_connected, turntable_connected, backend, mismatched_peers })) => {
+                            Ok(Some(beambench_protocol::DeviceEvent::Status {
+                                tx_connected,
+                                rx_connected,
+                                turntable_connected,
+                                backend,
+                                mismatched_peers,
+                            })) => {
                                 tracing::info!("Device verified as Bridge");
                                 let _ = state2.ws_tx.send(WsEvent::Log {
-                                    message: format!("{} confirmed as Bridge (TX: {}, RX: {}, Turntable: {})",
+                                    message: format!(
+                                        "{} confirmed as Bridge (TX: {}, RX: {}, Turntable: {})",
                                         port_name,
-                                        if tx_connected { "connected" } else { "not found" },
-                                        if rx_connected { "connected" } else { "not found" },
-                                        if turntable_connected { "connected" } else { "not found" }),
+                                        if tx_connected {
+                                            "connected"
+                                        } else {
+                                            "not found"
+                                        },
+                                        if rx_connected {
+                                            "connected"
+                                        } else {
+                                            "not found"
+                                        },
+                                        if turntable_connected {
+                                            "connected"
+                                        } else {
+                                            "not found"
+                                        }
+                                    ),
                                 });
-                                update_peer_status(&state2, tx_connected, rx_connected, turntable_connected);
+                                update_peer_status(
+                                    &state2,
+                                    tx_connected,
+                                    rx_connected,
+                                    turntable_connected,
+                                );
                                 update_backend_info(&state2, &backend).await;
                                 update_mismatched_peers(&state2, &mismatched_peers).await;
                                 state2.broadcast_status().await;
@@ -491,19 +525,31 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
                             Ok(Some(other)) => {
                                 tracing::info!("Unexpected response from device: {:?}", other);
                                 let _ = state2.ws_tx.send(WsEvent::Log {
-                                    message: format!("{}: got unexpected response — may not be Bridge", port_name),
+                                    message: format!(
+                                        "{}: got unexpected response — may not be Bridge",
+                                        port_name
+                                    ),
                                 });
                             }
                             Ok(None) => {
                                 tracing::warn!("Serial channel closed during verification");
                                 let _ = state2.ws_tx.send(WsEvent::Log {
-                                    message: format!("{}: connection lost during verification", port_name),
+                                    message: format!(
+                                        "{}: connection lost during verification",
+                                        port_name
+                                    ),
                                 });
                             }
                             Err(_) => {
-                                tracing::warn!("No response from {} — not a Bridge or firmware not running", port_name);
+                                tracing::warn!(
+                                    "No response from {} — not a Bridge or firmware not running",
+                                    port_name
+                                );
                                 state2.broadcast_error(
-                                    &format!("{}: no response — is this the Bridge device?", port_name),
+                                    &format!(
+                                        "{}: no response — is this the Bridge device?",
+                                        port_name
+                                    ),
                                     "Device did not respond. Is this the Bridge?",
                                 );
                             }
@@ -575,7 +621,10 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
                 let _ = state.ws_tx.send(WsEvent::Log {
                     message: format!(
                         "Sweep started: {}° to {}° (step {}°, {} samples)",
-                        config.start_deg, config.stop_deg, config.step_deg, config.samples_per_angle
+                        config.start_deg,
+                        config.stop_deg,
+                        config.step_deg,
+                        config.samples_per_angle
                     ),
                 });
                 let _ = state.ws_tx.send(WsEvent::Status(state.status().await));
@@ -609,17 +658,20 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
                 });
             } else {
                 state.sweeping.store(false, Ordering::SeqCst);
-                state.broadcast_error(
-                    "Sweep failed: not connected",
-                    "Not connected to serial/TCP",
-                );
+                state.broadcast_error("Sweep failed: not connected", "Not connected to serial/TCP");
             }
         }
         WsCommand::Stop => {
             let serial = state.serial.lock().await;
             if let Some(ref handle) = *serial {
-                let _ = handle.tx.send(beambench_protocol::PcCommand::StopTransmitting).await;
-                let _ = handle.tx.send(beambench_protocol::PcCommand::StopTurntable).await;
+                let _ = handle
+                    .tx
+                    .send(beambench_protocol::PcCommand::StopTransmitting)
+                    .await;
+                let _ = handle
+                    .tx
+                    .send(beambench_protocol::PcCommand::StopTurntable)
+                    .await;
             }
         }
         WsCommand::ConfigureTx(tx_config) => {
@@ -638,14 +690,18 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
         WsCommand::QueryStatus => {
             let serial = state.serial.lock().await;
             if let Some(ref handle) = *serial {
-                let _ = handle.tx.send(beambench_protocol::PcCommand::QueryStatus).await;
+                let _ = handle
+                    .tx
+                    .send(beambench_protocol::PcCommand::QueryStatus)
+                    .await;
             }
         }
         WsCommand::ExportCsv => {
             // CSV export is available via REST endpoint.
         }
         WsCommand::ReturnHome => {
-            if state.sweeping.load(Ordering::SeqCst) || state.ota_in_progress.load(Ordering::SeqCst) {
+            if state.sweeping.load(Ordering::SeqCst) || state.ota_in_progress.load(Ordering::SeqCst)
+            {
                 let _ = state.ws_tx.send(WsEvent::Error {
                     message: "Cannot return home while sweep or OTA is in progress".to_string(),
                 });
@@ -665,9 +721,17 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
 
                 let state = state.clone();
                 tokio::spawn(async move {
-                    match send_and_wait_move(&serial_tx, &serial_rx, beambench_protocol::PcCommand::ReturnHome).await {
+                    match send_and_wait_move(
+                        &serial_tx,
+                        &serial_rx,
+                        beambench_protocol::PcCommand::ReturnHome,
+                    )
+                    .await
+                    {
                         Ok(angle_deg) => {
-                            state.turntable_angle_cdeg.store((angle_deg * 100.0) as i32, Ordering::SeqCst);
+                            state
+                                .turntable_angle_cdeg
+                                .store((angle_deg * 100.0) as i32, Ordering::SeqCst);
                             let _ = state.ws_tx.send(WsEvent::HomeComplete);
                             let _ = state.ws_tx.send(WsEvent::Log {
                                 message: "Turntable reached home position".to_string(),
@@ -682,10 +746,16 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
                 });
             } else {
                 state.homing.store(false, Ordering::SeqCst);
-                state.broadcast_error("ReturnHome failed: not connected", "Not connected to serial/TCP");
+                state.broadcast_error(
+                    "ReturnHome failed: not connected",
+                    "Not connected to serial/TCP",
+                );
             }
         }
-        WsCommand::OtaUpload { target, firmware_path } => {
+        WsCommand::OtaUpload {
+            target,
+            firmware_path,
+        } => {
             if state.sweeping.load(Ordering::SeqCst) {
                 let _ = state.ws_tx.send(WsEvent::Error {
                     message: "Cannot start OTA while sweep is in progress".to_string(),
@@ -742,10 +812,7 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
                 );
             } else {
                 state.ota_in_progress.store(false, Ordering::SeqCst);
-                state.broadcast_error(
-                    "OTA failed: not connected",
-                    "Not connected to serial/TCP",
-                );
+                state.broadcast_error("OTA failed: not connected", "Not connected to serial/TCP");
             }
         }
         WsCommand::SetTransmissionRatio { ratio } => {
@@ -762,7 +829,10 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
             state.broadcast_status().await;
         }
         WsCommand::Jog { delta_deg } => {
-            if state.sweeping.load(Ordering::SeqCst) || state.homing.load(Ordering::SeqCst) || state.ota_in_progress.load(Ordering::SeqCst) {
+            if state.sweeping.load(Ordering::SeqCst)
+                || state.homing.load(Ordering::SeqCst)
+                || state.ota_in_progress.load(Ordering::SeqCst)
+            {
                 let _ = state.ws_tx.send(WsEvent::Error {
                     message: "Cannot jog while sweep, homing, or OTA is in progress".to_string(),
                 });
@@ -787,10 +857,20 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
 
                 let state = state.clone();
                 tokio::spawn(async move {
-                    match send_and_wait_move(&serial_tx, &serial_rx, beambench_protocol::PcCommand::MoveTo { angle_deg: motor_target_deg }).await {
+                    match send_and_wait_move(
+                        &serial_tx,
+                        &serial_rx,
+                        beambench_protocol::PcCommand::MoveTo {
+                            angle_deg: motor_target_deg,
+                        },
+                    )
+                    .await
+                    {
                         Ok(motor_angle_deg) => {
                             let angle_deg = motor_angle_deg / ratio;
-                            state.turntable_angle_cdeg.store((angle_deg * 100.0) as i32, Ordering::SeqCst);
+                            state
+                                .turntable_angle_cdeg
+                                .store((angle_deg * 100.0) as i32, Ordering::SeqCst);
                             let _ = state.ws_tx.send(WsEvent::Log {
                                 message: format!("Turntable at {:.1}°", angle_deg),
                             });
@@ -875,7 +955,11 @@ async fn status_poll_loop(
             return; // Disconnected.
         };
 
-        if serial_tx.send(beambench_protocol::PcCommand::QueryStatus).await.is_err() {
+        if serial_tx
+            .send(beambench_protocol::PcCommand::QueryStatus)
+            .await
+            .is_err()
+        {
             return;
         }
 
@@ -883,8 +967,20 @@ async fn status_poll_loop(
             let mut rx = serial_rx.lock().await;
             loop {
                 match rx.recv().await {
-                    Some(beambench_protocol::DeviceEvent::Status { tx_connected, rx_connected, turntable_connected, backend, mismatched_peers }) => {
-                        return Some((tx_connected, rx_connected, turntable_connected, backend, mismatched_peers));
+                    Some(beambench_protocol::DeviceEvent::Status {
+                        tx_connected,
+                        rx_connected,
+                        turntable_connected,
+                        backend,
+                        mismatched_peers,
+                    }) => {
+                        return Some((
+                            tx_connected,
+                            rx_connected,
+                            turntable_connected,
+                            backend,
+                            mismatched_peers,
+                        ));
                     }
                     Some(_) => continue,
                     None => return None,
@@ -921,18 +1017,20 @@ async fn static_handler(uri: axum::http::Uri) -> impl IntoResponse {
             let mime = mime_guess::from_path(path)
                 .first_or_octet_stream()
                 .to_string();
-            ([(axum::http::header::CONTENT_TYPE, mime)], content.data.into_response()).into_response()
+            (
+                [(axum::http::header::CONTENT_TYPE, mime)],
+                content.data.into_response(),
+            )
+                .into_response()
         }
         None => {
             // SPA fallback — serve index.html for client-side routing.
             match FrontendAssets::get("index.html") {
-                Some(content) => {
-                    (
-                        [(axum::http::header::CONTENT_TYPE, "text/html".to_string())],
-                        content.data.into_response(),
-                    )
-                        .into_response()
-                }
+                Some(content) => (
+                    [(axum::http::header::CONTENT_TYPE, "text/html".to_string())],
+                    content.data.into_response(),
+                )
+                    .into_response(),
                 None => (axum::http::StatusCode::NOT_FOUND, "Not found").into_response(),
             }
         }

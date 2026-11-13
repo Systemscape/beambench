@@ -31,9 +31,7 @@ impl TxState {
     pub fn handle_message(&mut self, msg: &EspnowMessage) -> Option<EspnowMessage> {
         match msg {
             EspnowMessage::TxCmd(cmd) => match cmd {
-                TxCommand::Configure {
-                    packet_rate_hz, ..
-                } => {
+                TxCommand::Configure { packet_rate_hz, .. } => {
                     self.set_packet_rate(*packet_rate_hz);
                     Some(EspnowMessage::TxResp(TxResponse::Ack))
                 }
