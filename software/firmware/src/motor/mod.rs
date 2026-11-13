@@ -1,10 +1,6 @@
 #[allow(dead_code)]
 pub mod step_dir;
 
-#[cfg(feature = "servo42c")]
-#[expect(dead_code, reason = "not wired into the turntable role yet")]
-pub mod servo42c;
-
 /// Position in microsteps from zero (signed).
 pub type Position = i32;
 

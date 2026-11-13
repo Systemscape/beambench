@@ -80,7 +80,7 @@ Once the boards are paired, follow-up firmware updates can be pushed wirelessly 
 
 ## Hardware
 
-Four **ESP32-C3-DevKit-RUST-1** boards plus a stepper-motor driver. Default driver is the **MKS SERVO42D** (step/dir); a UART variant (SERVO42C) is also supported.
+Four **ESP32-C3-DevKit-RUST-1** boards plus a stepper-motor driver. The motor driver is the **MKS SERVO42D** (step/dir).
 
 **Step/Dir wiring (default):**
 

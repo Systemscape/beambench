@@ -18,7 +18,6 @@ backend-uart = []
 
 # Motor backend for the turntable role.
 step-dir = []
-servo42c = ["dep:mks-servo42-rs"]
 
 [dependencies]
 beambench-protocol = { path = "../protocol", features = ["defmt"] }
@@ -59,8 +58,6 @@ postcard = { version = "1", features = ["experimental-derive"] }
 heapless = "0.9.3"
 critical-section = "1.2.0"
 
-# Motor backends (turntable role)
-mks-servo42-rs = { version = "1.0.4", optional = true }
 sha2 = { version = "0.11.1", default-features = false }
 
 [profile.release]
