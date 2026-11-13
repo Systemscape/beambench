@@ -117,7 +117,10 @@ const PC_COMMAND_V1: &[(&str, &str)] = &[
     ("StartMeasurement", "01 06"),
     ("ReportMeasurement", "01 07"),
     ("QueryStatus", "01 08"),
-    ("OtaBegin", "01 09 01 e8 07 ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab 04"),
+    (
+        "OtaBegin",
+        "01 09 01 e8 07 ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab 04",
+    ),
     ("OtaData", "01 0a 00 ac 02 02 01 02"),
     ("OtaFinish", "01 0b 02"),
 ];
@@ -317,7 +320,10 @@ const ESPNOW_MESSAGE_V1: &[(&str, &str)] = &[
     ("StartMeasurement", "01 07"),
     ("ReportMeasurement", "01 08"),
     ("MeasurementResult", "01 09 00 00 2a c2 0a"),
-    ("OtaBegin", "01 0a e8 07 ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab 04"),
+    (
+        "OtaBegin",
+        "01 0a e8 07 ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab 04",
+    ),
     ("OtaReady", "01 0b"),
     ("OtaData", "01 0c ac 02 02 01 02"),
     ("OtaAck", "01 0d ac 02"),

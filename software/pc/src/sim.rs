@@ -11,8 +11,8 @@ use beambench_protocol::bridge_logic::{self, RouteAction};
 use beambench_protocol::rx_logic::MeasurementState;
 use beambench_protocol::tx_logic::TxState;
 use beambench_protocol::{
-    BackendInfo, DeviceEvent, EspnowMessage, PcCommand, Role, TurntableCommand, TurntableResponse,
-    MAX_MSG_SIZE,
+    BackendInfo, DeviceEvent, EspnowMessage, MAX_MSG_SIZE, PcCommand, Role, TurntableCommand,
+    TurntableResponse,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;

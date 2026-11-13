@@ -1,24 +1,24 @@
 //! Beambench PC application — Axum server with WebSocket and embedded frontend.
 
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 
 use axum::{
+    Router,
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
         Multipart, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
     },
     response::{IntoResponse, Json},
     routing::{get, post},
-    Router,
 };
 use clap::Parser;
 use rust_embed::Embed;
-use tokio::sync::{broadcast, watch, Mutex};
+use tokio::sync::{Mutex, broadcast, watch};
 use tracing::info;
 
 use beambench_pc::{
-    export_csv, PortInfo, SystemStatus, WsCommand, WsEvent, DEFAULT_TRANSMISSION_RATIO,
+    DEFAULT_TRANSMISSION_RATIO, PortInfo, SystemStatus, WsCommand, WsEvent, export_csv,
 };
 
 /// Initial delay before sending QueryStatus to a freshly-opened device.

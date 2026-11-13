@@ -51,9 +51,9 @@
 
 use std::sync::Arc;
 
-use beambench_protocol::{DeviceEvent, PcCommand, Role, OTA_CHUNK_SIZE};
+use beambench_protocol::{DeviceEvent, OTA_CHUNK_SIZE, PcCommand, Role};
 use sha2::{Digest, Sha256};
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::{Mutex, broadcast, mpsc};
 
 use crate::WsEvent;
 

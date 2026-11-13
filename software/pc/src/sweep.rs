@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use crate::{DataPoint, SweepConfig, WsEvent};
 use beambench_protocol::{DeviceEvent, PcCommand};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tracing::{error, info};
 
 /// Timeout for waiting on a turntable MoveComplete response.

@@ -469,9 +469,9 @@ mod test {
     use serde::{Deserialize, Serialize};
 
     use crate::{
-        BackendInfo, DecodeError, DeviceEvent, EspnowMessage, HelloBeacon, PairConfirm, PcCommand,
-        PcToRx, PeerMismatch, Role, RxToPc, TurntableCommand, TurntableResponse, TxCommand,
-        TxResponse, MAX_MSG_SIZE,
+        BackendInfo, DecodeError, DeviceEvent, EspnowMessage, HelloBeacon, MAX_MSG_SIZE,
+        PairConfirm, PcCommand, PcToRx, PeerMismatch, Role, RxToPc, TurntableCommand,
+        TurntableResponse, TxCommand, TxResponse,
     };
 
     /// Serialize `msg` into `buf` with postcard, then deserialize and assert equality.
@@ -885,7 +885,7 @@ mod test {
     // ── Bridge routing tests ──────────────────────────────────────────────
 
     mod bridge_routing_tests {
-        use crate::bridge_logic::{route_command, translate_response, RouteAction};
+        use crate::bridge_logic::{RouteAction, route_command, translate_response};
         use crate::*;
 
         #[test]
@@ -1148,8 +1148,8 @@ mod test {
     // ── RX measurement logic tests ───────────────────────────────────────
 
     mod rx_logic_tests {
-        use crate::rx_logic::MeasurementState;
         use crate::EspnowMessage;
+        use crate::rx_logic::MeasurementState;
 
         #[test]
         fn initially_not_measuring() {
@@ -1297,7 +1297,7 @@ mod test {
     // ── End-to-end measurement simulation ────────────────────────────────
 
     mod measurement_simulation {
-        use crate::bridge_logic::{route_command, translate_response, RouteAction};
+        use crate::bridge_logic::{RouteAction, route_command, translate_response};
         use crate::rx_logic::MeasurementState;
         use crate::tx_logic::TxState;
         use crate::*;

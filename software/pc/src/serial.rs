@@ -2,9 +2,9 @@
 
 use std::sync::Arc;
 
-use beambench_protocol::{DecodeError, DeviceEvent, PcCommand, PROTOCOL_VERSION};
+use beambench_protocol::{DecodeError, DeviceEvent, PROTOCOL_VERSION, PcCommand};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tokio_serial::SerialPortBuilderExt;
 use tracing::{debug, error, info, warn};
 
