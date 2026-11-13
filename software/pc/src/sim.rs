@@ -97,6 +97,7 @@ pub async fn handle_connection(stream: tokio::net::TcpStream) {
                     name: heapless::String::try_from("sim").unwrap(),
                     frequency_mhz: Some(2400),
                 },
+                mismatched_peers: heapless::Vec::new(),
             }),
         };
 
@@ -130,7 +131,8 @@ pub async fn cobs_reader(mut reader: impl AsyncReadExt + Unpin, tx: mpsc::Sender
                 while let Some(zero_pos) = accum.iter().position(|&b| b == 0) {
                     let frame = &accum[..zero_pos + 1];
                     if frame.len() > 1 {
-                        match postcard::from_bytes_cobs::<PcCommand>(&mut frame.to_vec()) {
+                        match beambench_protocol::deserialize_cobs::<PcCommand>(&mut frame.to_vec())
+                        {
                             Ok(msg) => {
                                 if tx.send(msg).await.is_err() {
                                     return;

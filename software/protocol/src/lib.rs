@@ -4,8 +4,11 @@
 //! and the PC application. Messages are serialized with `postcard`.
 //!
 //! Two protocol layers:
-//! - **Serial** (PC ↔ RX board): COBS-framed postcard over USB-serial
+//! - **Serial** (PC ↔ Bridge): COBS-framed postcard over USB-serial
 //! - **ESPNOW** (between boards): postcard-serialized payloads in ESPNOW frames
+//!
+//! Every frame starts with [`PROTOCOL_VERSION`]. A receiver reads only that
+//! header first and does not decode frames from another version.
 
 #![no_std]
 
@@ -13,11 +16,19 @@ pub mod bridge_logic;
 pub mod rx_logic;
 pub mod tx_logic;
 
+#[cfg(test)]
+mod golden;
+
 use heapless::{String, Vec};
 use serde::{Deserialize, Serialize};
 
+/// Wire format version. Bump on every change to the serialized layout of any
+/// message. The golden-bytes tests fail when the layout changes.
+pub const PROTOCOL_VERSION: u16 = 1;
+
 /// Maximum payload per OTA chunk. Must fit in a 250-byte ESP-NOW frame after
-/// postcard serialization overhead (tag byte + seq u16 + length varint).
+/// postcard serialization overhead (version header + tag byte + seq u16 +
+/// length varint).
 pub const OTA_CHUNK_SIZE: usize = 240;
 
 // ── Board roles (used during ESPNOW discovery) ──────────────────────────────
@@ -255,6 +266,8 @@ pub enum DeviceEvent {
         rx_connected: bool,
         turntable_connected: bool,
         backend: BackendInfo,
+        /// Boards whose frames the bridge dropped because of another protocol version.
+        mismatched_peers: Vec<PeerMismatch, MAX_MISMATCHED_PEERS>,
     },
     Error { description: String<128> },
 
@@ -267,6 +280,17 @@ pub enum DeviceEvent {
     OtaComplete,
     /// OTA failed on the target device.
     OtaError { description: String<64> },
+}
+
+/// Maximum number of mismatched boards reported in `DeviceEvent::Status`.
+pub const MAX_MISMATCHED_PEERS: usize = 4;
+
+/// A board that speaks another protocol version.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct PeerMismatch {
+    pub mac: [u8; 6],
+    pub protocol: u16,
 }
 
 // ── Serial protocol v1 (PC ↔ RX, legacy) ───────────────────────────────────
@@ -352,24 +376,49 @@ pub mod turntable {
 /// Maximum serialized message size (ESPNOW payload limit is 250 bytes).
 pub const MAX_MSG_SIZE: usize = 250;
 
-/// Serialize a message into a buffer. Returns the serialized slice.
+/// Error when decoding a frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DecodeError {
+    /// The sender speaks another protocol version. The message was not decoded.
+    VersionMismatch { protocol: u16 },
+    /// The frame is malformed.
+    Postcard(postcard::Error),
+}
+
+impl From<postcard::Error> for DecodeError {
+    fn from(e: postcard::Error) -> Self {
+        DecodeError::Postcard(e)
+    }
+}
+
+/// Serialize a message with version header into a buffer. Returns the serialized slice.
 pub fn serialize<'a, T: Serialize>(
     msg: &T,
     buf: &'a mut [u8],
 ) -> Result<&'a mut [u8], postcard::Error> {
-    postcard::to_slice(msg, buf)
+    postcard::to_slice(&(PROTOCOL_VERSION, msg), buf)
 }
 
-/// Deserialize a message from a byte slice.
-pub fn deserialize<'a, T: Deserialize<'a>>(buf: &'a [u8]) -> Result<T, postcard::Error> {
-    postcard::from_bytes(buf)
+/// Deserialize a message from a byte slice. Checks the version header first.
+pub fn deserialize<'a, T: Deserialize<'a>>(buf: &'a [u8]) -> Result<T, DecodeError> {
+    let (protocol, msg) = postcard::take_from_bytes::<u16>(buf)?;
+    if protocol != PROTOCOL_VERSION {
+        return Err(DecodeError::VersionMismatch { protocol });
+    }
+    Ok(postcard::from_bytes(msg)?)
 }
 
-/// Serialize a message with COBS framing (for serial protocol).
+/// Serialize a message with version header and COBS framing (for serial protocol).
 /// Returns the number of bytes written to `buf`.
 pub fn serialize_cobs<T: Serialize>(msg: &T, buf: &mut [u8]) -> Result<usize, postcard::Error> {
-    let used = postcard::to_slice_cobs(msg, buf)?;
+    let used = postcard::to_slice_cobs(&(PROTOCOL_VERSION, msg), buf)?;
     Ok(used.len())
+}
+
+/// Deserialize a COBS frame in place. Checks the version header first.
+pub fn deserialize_cobs<'a, T: Deserialize<'a>>(buf: &'a mut [u8]) -> Result<T, DecodeError> {
+    let len = cobs::decode_in_place(buf).map_err(|_| postcard::Error::DeserializeBadEncoding)?;
+    deserialize(&buf[..len])
 }
 
 #[cfg(test)]
@@ -380,7 +429,8 @@ mod test {
     use serde::{Deserialize, Serialize};
 
     use crate::{
-        BackendInfo, DeviceEvent, EspnowMessage, HelloBeacon, PairConfirm, PcCommand, PcToRx,
+        BackendInfo, DecodeError, DeviceEvent, EspnowMessage, HelloBeacon, PairConfirm, PcCommand,
+        PcToRx, PeerMismatch,
         Role, RxToPc, TurntableCommand, TurntableResponse, TxCommand, TxResponse, MAX_MSG_SIZE,
     };
 
@@ -471,7 +521,7 @@ mod test {
         let len = super::serialize_cobs(msg, buf).expect("COBS serialize failed");
         assert_eq!(buf[len - 1], 0x00, "COBS frame must end with zero byte");
         let decoded: T =
-            postcard::from_bytes_cobs(&mut buf[..len]).expect("COBS deserialize failed");
+            super::deserialize_cobs(&mut buf[..len]).expect("COBS deserialize failed");
         assert_eq!(&decoded, msg);
     }
 
@@ -481,12 +531,30 @@ mod test {
         let cmd = PcCommand::MoveTo { angle_deg: 90.0 };
         let mut buf = [0u8; MAX_MSG_SIZE];
 
-        // Variant index 3, then 90.0f32 little-endian.
+        // Version 1, variant index 3, then 90.0f32 little-endian.
         let plain = super::serialize(&cmd, &mut buf).unwrap();
-        assert_eq!(plain, [0x03, 0x00, 0x00, 0xB4, 0x42]);
+        assert_eq!(plain, [0x01, 0x03, 0x00, 0x00, 0xB4, 0x42]);
 
         let len = super::serialize_cobs(&cmd, &mut buf).unwrap();
-        assert_eq!(buf[..len], [0x02, 0x03, 0x01, 0x03, 0xB4, 0x42, 0x00]);
+        assert_eq!(buf[..len], [0x03, 0x01, 0x03, 0x01, 0x03, 0xB4, 0x42, 0x00]);
+    }
+
+    #[test]
+    fn version_mismatch_is_not_decoded() {
+        let mut buf = [0u8; MAX_MSG_SIZE];
+        let len = super::serialize(&PcCommand::QueryStatus, &mut buf).unwrap().len();
+        buf[0] = 2;
+        assert_eq!(
+            super::deserialize::<PcCommand>(&buf[..len]),
+            Err(DecodeError::VersionMismatch { protocol: 2 })
+        );
+
+        // Same for a COBS frame whose payload would not even parse as `PcCommand`.
+        let mut frame = [0x03, 0x02, 0xFF, 0x00];
+        assert_eq!(
+            super::deserialize_cobs::<PcCommand>(&mut frame),
+            Err(DecodeError::VersionMismatch { protocol: 2 })
+        );
     }
 
     #[test]
@@ -678,6 +746,11 @@ mod test {
                     name: String::try_from("espnow").unwrap(),
                     frequency_mhz: Some(2400),
                 },
+                mismatched_peers: Vec::from_slice(&[PeerMismatch {
+                    mac: [1, 2, 3, 4, 5, 6],
+                    protocol: 7,
+                }])
+                .unwrap(),
             },
             &mut buf,
         );

@@ -184,6 +184,13 @@ async fn turntable_listener_task(
                     .await;
                 }
             }
+            Err(proto::DecodeError::VersionMismatch { protocol }) => {
+                info!(
+                    "Dropped frame with protocol v{}, expected v{}",
+                    protocol,
+                    proto::PROTOCOL_VERSION
+                );
+            }
             _ => {}
         }
     }

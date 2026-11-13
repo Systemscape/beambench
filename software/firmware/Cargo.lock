@@ -82,6 +82,7 @@ dependencies = [
 name = "beambench-protocol"
 version = "0.1.0"
 dependencies = [
+ "cobs",
  "defmt 1.2.0",
  "heapless 0.9.3",
  "postcard",

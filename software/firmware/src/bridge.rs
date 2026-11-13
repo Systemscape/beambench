@@ -21,7 +21,9 @@ use esp_hal::{
 use esp_radio::esp_now::{BROADCAST_ADDRESS, EspNowManager, EspNowReceiver, EspNowSender};
 
 use beambench_protocol::bridge_logic;
-use beambench_protocol::{self as proto, DeviceEvent, EspnowMessage, PcCommand, Role};
+use beambench_protocol::{
+    self as proto, DecodeError, DeviceEvent, EspnowMessage, PcCommand, PeerMismatch, Role,
+};
 
 use crate::common::*;
 use crate::mk_static;
@@ -32,6 +34,8 @@ struct PeerTable {
     rx: Option<([u8; 6], Instant)>,
     tx: Option<([u8; 6], Instant)>,
     turntable: Option<([u8; 6], Instant)>,
+    /// Boards whose frames were dropped because of another protocol version.
+    mismatches: heapless::Vec<PeerMismatch, { proto::MAX_MISMATCHED_PEERS }>,
 }
 
 impl PeerTable {
@@ -40,7 +44,29 @@ impl PeerTable {
             rx: None,
             tx: None,
             turntable: None,
+            mismatches: heapless::Vec::new(),
         }
+    }
+
+    /// Remember a board that speaks another protocol version.
+    /// Further boards are ignored once the list is full.
+    fn record_mismatch(&mut self, mac: [u8; 6], protocol: u16) {
+        match self.mismatches.iter_mut().find(|m| m.mac == mac) {
+            Some(m) => m.protocol = protocol,
+            None => {
+                if self.mismatches.push(PeerMismatch { mac, protocol }).is_ok() {
+                    info!(
+                        "Peer {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} speaks protocol v{}",
+                        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], protocol
+                    );
+                }
+            }
+        }
+    }
+
+    /// Forget a mismatch once the board sends a valid frame, e.g. after reflashing.
+    fn clear_mismatch(&mut self, mac: &[u8; 6]) {
+        self.mismatches.retain(|m| m.mac != *mac);
     }
 
     fn entry(&self, role: Role) -> &Option<([u8; 6], Instant)> {
@@ -94,6 +120,7 @@ impl PeerTable {
             rx_connected: self.rx.is_some(),
             turntable_connected: self.turntable.is_some(),
             backend: crate::measurement::active_backend_info(),
+            mismatched_peers: self.mismatches.clone(),
         }
     }
 }
@@ -170,10 +197,20 @@ async fn bridge_serial_rx_task(
                     let len = accum.len();
                     frame_buf[..len].copy_from_slice(&accum);
                     frame_buf[len] = 0x00;
-                    match postcard::from_bytes_cobs::<PcCommand>(&mut frame_buf[..len + 1]) {
+                    match proto::deserialize_cobs::<PcCommand>(&mut frame_buf[..len + 1]) {
                         Ok(cmd) => {
                             info!("PC cmd: {:?}", defmt::Debug2Format(&cmd));
                             handle_pc_command(cmd, sender, peers, &event_tx, led_signal).await;
+                        }
+                        Err(DecodeError::VersionMismatch { protocol }) => {
+                            // The PC only reads the version header of this reply.
+                            info!("PC speaks protocol v{}, dropping command", protocol);
+                            event_tx
+                                .send(DeviceEvent::Error {
+                                    description: heapless::String::try_from("Protocol mismatch")
+                                        .unwrap(),
+                                })
+                                .await;
                         }
                         Err(_) => {
                             info!("Failed to decode PcCommand ({} bytes)", len);
@@ -339,6 +376,13 @@ async fn bridge_listener_task(
         let src = received.info.src_address;
 
         let msg: Result<EspnowMessage, _> = proto::deserialize(data);
+        match msg {
+            Ok(_) => peers.lock().await.clear_mismatch(&src),
+            Err(DecodeError::VersionMismatch { protocol }) => {
+                peers.lock().await.record_mismatch(src, protocol);
+            }
+            Err(_) => {}
+        }
         match msg {
             Ok(EspnowMessage::Hello(hello)) if hello.role != Role::Bridge => {
                 let role = hello.role;

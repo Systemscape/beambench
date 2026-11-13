@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use beambench_protocol::{DeviceEvent, PcCommand};
+use beambench_protocol::{DecodeError, DeviceEvent, PcCommand, PROTOCOL_VERSION};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Mutex, mpsc};
 use tokio_serial::SerialPortBuilderExt;
@@ -138,8 +138,15 @@ async fn reader_task<R: AsyncReadExt + Unpin>(
                         while let Some(zero_pos) = accum.iter().position(|&b| b == 0) {
                             let frame = &accum[..zero_pos + 1];
                             if frame.len() > 1 {
-                                match postcard::from_bytes_cobs(&mut frame.to_vec()) {
+                                match beambench_protocol::deserialize_cobs(&mut frame.to_vec()) {
                                     Ok(msg) => {
+                                        if responses.send(msg).await.is_err() {
+                                            return;
+                                        }
+                                    }
+                                    Err(DecodeError::VersionMismatch { protocol }) => {
+                                        let msg = mismatch_error(protocol);
+                                        warn!("{:?}", msg);
                                         if responses.send(msg).await.is_err() {
                                             return;
                                         }
@@ -163,6 +170,16 @@ async fn reader_task<R: AsyncReadExt + Unpin>(
                 return;
             }
         }
+    }
+}
+
+/// Error event for a frame from a bridge with another protocol version.
+fn mismatch_error(protocol: u16) -> DeviceEvent {
+    let text = format!(
+        "Protocol mismatch: bridge speaks v{protocol}, PC v{PROTOCOL_VERSION}. Reflash the bridge."
+    );
+    DeviceEvent::Error {
+        description: heapless::String::try_from(text.as_str()).unwrap_or_default(),
     }
 }
 
@@ -251,6 +268,22 @@ mod tests {
 
         let decoded = resp_rx.recv().await.expect("should receive decoded message");
         assert_eq!(decoded, msg);
+    }
+
+    #[tokio::test]
+    async fn reader_reports_version_mismatch() {
+        // COBS frame with version 2 and a payload this PC cannot parse.
+        let frame = [0x03, 0x02, 0xFF, 0x00];
+
+        let (resp_tx, mut resp_rx) = mpsc::channel::<DeviceEvent>(16);
+        let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let (mut writer, reader) = tokio::io::duplex(1024);
+        tokio::spawn(reader_task(reader, resp_tx, cancel_rx));
+
+        writer.write_all(&frame).await.unwrap();
+        drop(writer);
+
+        assert_eq!(resp_rx.recv().await, Some(mismatch_error(2)));
     }
 
     #[tokio::test]

@@ -71,6 +71,8 @@ struct AppState {
     turntable_connected: AtomicBool,
     backend_name: Mutex<String>,
     backend_freq_mhz: Mutex<Option<u16>>,
+    /// Boards with another protocol version, as last reported by the bridge.
+    mismatched_peers: Mutex<Vec<beambench_protocol::PeerMismatch>>,
     /// Tracked turntable angle in centi-degrees (×100) for atomic access.
     turntable_angle_cdeg: AtomicI32,
     /// Whether a jog move is in progress.
@@ -230,6 +232,7 @@ async fn main() {
         turntable_connected: AtomicBool::new(false),
         backend_name: Mutex::new(String::new()),
         backend_freq_mhz: Mutex::new(None),
+        mismatched_peers: Mutex::new(Vec::new()),
         turntable_angle_cdeg: AtomicI32::new(0),
         jogging: AtomicBool::new(false),
         ota_in_progress: AtomicBool::new(false),
@@ -465,7 +468,7 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
                         .await;
 
                         match result {
-                            Ok(Some(beambench_protocol::DeviceEvent::Status { tx_connected, rx_connected, turntable_connected, backend })) => {
+                            Ok(Some(beambench_protocol::DeviceEvent::Status { tx_connected, rx_connected, turntable_connected, backend, mismatched_peers })) => {
                                 tracing::info!("Device verified as Bridge");
                                 let _ = state2.ws_tx.send(WsEvent::Log {
                                     message: format!("{} confirmed as Bridge (TX: {}, RX: {}, Turntable: {})",
@@ -476,7 +479,14 @@ async fn handle_command(cmd: WsCommand, state: &Arc<AppState>) {
                                 });
                                 update_peer_status(&state2, tx_connected, rx_connected, turntable_connected);
                                 update_backend_info(&state2, &backend).await;
+                                update_mismatched_peers(&state2, &mismatched_peers).await;
                                 state2.broadcast_status().await;
+                            }
+                            Ok(Some(beambench_protocol::DeviceEvent::Error { description })) => {
+                                state2.broadcast_error(
+                                    &format!("{}: {}", port_name, description),
+                                    &description,
+                                );
                             }
                             Ok(Some(other)) => {
                                 tracing::info!("Unexpected response from device: {:?}", other);
@@ -813,6 +823,24 @@ async fn update_backend_info(state: &AppState, backend: &beambench_protocol::Bac
     *state.backend_freq_mhz.lock().await = backend.frequency_mhz;
 }
 
+/// Report boards with another protocol version, once per change.
+async fn update_mismatched_peers(state: &AppState, peers: &[beambench_protocol::PeerMismatch]) {
+    let mut known = state.mismatched_peers.lock().await;
+    if known.as_slice() == peers {
+        return;
+    }
+    *known = peers.to_vec();
+    for p in peers {
+        let mac = p.mac.map(|b| format!("{b:02x}")).join(":");
+        let msg = format!(
+            "Board {mac} speaks protocol v{}, PC v{}. Reflash it.",
+            p.protocol,
+            beambench_protocol::PROTOCOL_VERSION
+        );
+        state.broadcast_error(&msg, &msg);
+    }
+}
+
 /// Periodically poll the bridge for device connection status.
 ///
 /// Stops when the poll generation changes (new connect or disconnect).
@@ -855,8 +883,8 @@ async fn status_poll_loop(
             let mut rx = serial_rx.lock().await;
             loop {
                 match rx.recv().await {
-                    Some(beambench_protocol::DeviceEvent::Status { tx_connected, rx_connected, turntable_connected, backend }) => {
-                        return Some((tx_connected, rx_connected, turntable_connected, backend));
+                    Some(beambench_protocol::DeviceEvent::Status { tx_connected, rx_connected, turntable_connected, backend, mismatched_peers }) => {
+                        return Some((tx_connected, rx_connected, turntable_connected, backend, mismatched_peers));
                     }
                     Some(_) => continue,
                     None => return None,
@@ -866,9 +894,10 @@ async fn status_poll_loop(
         .await;
 
         match result {
-            Ok(Some((tx, rx, turntable, backend))) => {
+            Ok(Some((tx, rx, turntable, backend, mismatched_peers))) => {
                 update_peer_status(state, tx, rx, turntable);
                 update_backend_info(state, &backend).await;
+                update_mismatched_peers(state, &mismatched_peers).await;
                 state.broadcast_status().await;
             }
             Ok(None) => {
