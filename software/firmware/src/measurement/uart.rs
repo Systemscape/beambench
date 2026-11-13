@@ -169,10 +169,10 @@ fn parse_report(line: &str) -> MeasurementResult {
             if let Some(v) = parse_f32(val) {
                 rssi_dbm = v;
             }
-        } else if let Some(val) = part.strip_prefix("N:") {
-            if let Some(v) = parse_u16(val) {
-                sample_count = v;
-            }
+        } else if let Some(val) = part.strip_prefix("N:")
+            && let Some(v) = parse_u16(val)
+        {
+            sample_count = v;
         }
     }
 

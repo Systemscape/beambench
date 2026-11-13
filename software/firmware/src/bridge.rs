@@ -102,12 +102,9 @@ impl PeerTable {
     }
 
     fn role_for_mac(&self, mac: &[u8; 6]) -> Option<Role> {
-        for role in [Role::Rx, Role::Tx, Role::Turntable] {
-            if self.peer_for_role(role) == Some(*mac) {
-                return Some(role);
-            }
-        }
-        None
+        [Role::Rx, Role::Tx, Role::Turntable]
+            .into_iter()
+            .find(|&role| self.peer_for_role(role) == Some(*mac))
     }
 
     fn all_connected(&self) -> bool {
@@ -331,7 +328,7 @@ async fn bridge_discovery_task(
             for role in [Role::Rx, Role::Tx, Role::Turntable] {
                 let stale = p
                     .entry(role)
-                    .map_or(false, |(_, t)| is_heartbeat_stale(Some(t)));
+                    .is_some_and(|(_, t)| is_heartbeat_stale(Some(t)));
                 if stale {
                     if let Some(mac) = p.peer_for_role(role) {
                         info!(

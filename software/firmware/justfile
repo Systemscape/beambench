@@ -13,6 +13,16 @@ build:
 check:
     cargo check
 
+# Lint all roles and backends with clippy, warnings are errors
+clippy:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for features in "" role-bridge role-rx role-tx role-turntable \
+        role-rx,backend-uart role-tx,backend-uart role-turntable,servo42c; do
+        echo "clippy: [$features]"
+        cargo clippy --release --features "$features" -- -D warnings
+    done
+
 # Provision a board: builds with the role feature, flashes bootloader +
 # partition table + firmware via espflash. Use once per board.
 flash-rx:

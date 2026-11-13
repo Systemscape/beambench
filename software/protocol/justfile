@@ -10,3 +10,7 @@ check:
 # Run tests
 test:
     cargo test
+
+# Lint with clippy, warnings are errors
+clippy:
+    cargo clippy --all-targets --all-features -- -D warnings

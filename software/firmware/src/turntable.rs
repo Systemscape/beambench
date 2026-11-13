@@ -1,5 +1,10 @@
 //! Turntable role — motor controller receiving commands via ESPNOW.
 
+#![expect(
+    clippy::too_many_arguments,
+    reason = "embassy tasks receive their static resources as arguments"
+)]
+
 use defmt::info;
 use embassy_executor::Spawner;
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, mutex::Mutex, signal::Signal};
@@ -160,7 +165,7 @@ async fn turntable_listener_task(
             Ok(EspnowMessage::TurntableCmd(cmd)) => {
                 let is_bridge = {
                     let mac = bridge_mac.lock().await;
-                    mac.map_or(false, |m| m == src)
+                    mac.is_some_and(|m| m == src)
                 };
                 if is_bridge {
                     *last_bridge_seen.lock().await = Some(Instant::now());

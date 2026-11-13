@@ -121,7 +121,7 @@ pub async fn stream_firmware(
     ws_tx: &broadcast::Sender<WsEvent>,
 ) -> Result<(), String> {
     let total_size = firmware.len() as u32;
-    let total_chunks = (firmware.len() + OTA_CHUNK_SIZE - 1) / OTA_CHUNK_SIZE;
+    let total_chunks = firmware.len().div_ceil(OTA_CHUNK_SIZE);
     let ack_interval = ack_interval.max(1) as usize;
 
     // Compute SHA-256 before streaming so the target can verify at the end.

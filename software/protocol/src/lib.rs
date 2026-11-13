@@ -228,6 +228,7 @@ pub enum EspnowMessage {
 /// to the appropriate field device by role.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[expect(clippy::large_enum_variant, reason = "no_std without alloc; OTA chunks are inline")]
 pub enum PcCommand {
     // TX control
     ConfigureTx {

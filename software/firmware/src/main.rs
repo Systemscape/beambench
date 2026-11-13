@@ -45,7 +45,9 @@ type Led =
 
 #[defmt::panic_handler]
 fn defmt_panic() -> ! {
-    loop {}
+    loop {
+        core::hint::spin_loop();
+    }
 }
 
 defmt::timestamp!("");

@@ -130,16 +130,12 @@ pub async fn cobs_reader(mut reader: impl AsyncReadExt + Unpin, tx: mpsc::Sender
                 accum.extend_from_slice(&raw_buf[..n]);
                 while let Some(zero_pos) = accum.iter().position(|&b| b == 0) {
                     let frame = &accum[..zero_pos + 1];
-                    if frame.len() > 1 {
-                        match beambench_protocol::deserialize_cobs::<PcCommand>(&mut frame.to_vec())
-                        {
-                            Ok(msg) => {
-                                if tx.send(msg).await.is_err() {
-                                    return;
-                                }
-                            }
-                            Err(_) => {}
-                        }
+                    if frame.len() > 1
+                        && let Ok(msg) =
+                            beambench_protocol::deserialize_cobs::<PcCommand>(&mut frame.to_vec())
+                        && tx.send(msg).await.is_err()
+                    {
+                        return;
                     }
                     accum = accum[zero_pos + 1..].to_vec();
                 }
@@ -157,13 +153,10 @@ pub async fn cobs_writer(
     let mut buf = [0u8; MAX_MSG_SIZE];
 
     while let Some(msg) = rx.recv().await {
-        match beambench_protocol::serialize_cobs(&msg, &mut buf) {
-            Ok(len) => {
-                if writer.write_all(&buf[..len]).await.is_err() {
-                    return;
-                }
-            }
-            Err(_) => {}
+        if let Ok(len) = beambench_protocol::serialize_cobs(&msg, &mut buf)
+            && writer.write_all(&buf[..len]).await.is_err()
+        {
+            return;
         }
     }
 }

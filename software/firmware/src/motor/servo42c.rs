@@ -64,13 +64,12 @@ impl Motor for Servo42cMotor<'_> {
         cmd_buf[..len].copy_from_slice(cmd);
 
         let mut resp = [0u8; 16];
-        if let Ok(n) = self.transact(&cmd_buf[..len], &mut resp) {
-            if let Ok(r) = mks_servo42_rs::parse_success_response(&resp[..n]) {
-                if r.is_success() {
-                    defmt::info!("Motor {}.", if enabled { "enabled" } else { "disabled" });
-                    return;
-                }
-            }
+        if let Ok(n) = self.transact(&cmd_buf[..len], &mut resp)
+            && let Ok(r) = mks_servo42_rs::parse_success_response(&resp[..n])
+            && r.is_success()
+        {
+            defmt::info!("Motor {}.", if enabled { "enabled" } else { "disabled" });
+            return;
         }
         defmt::warn!(
             "Failed to {} motor",

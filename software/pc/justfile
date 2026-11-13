@@ -33,6 +33,10 @@ sim:
 check:
     cargo check
 
+# Lint Rust code with clippy, warnings are errors
+clippy:
+    cargo clippy --all-targets --features sim -- -D warnings
+
 # Run unit tests (lib only)
 test:
     cargo test --lib

@@ -11,6 +11,7 @@ use crate::{
 /// The result of routing a PcCommand: either an ESP-NOW message to send to a
 /// specific role, or a locally-handled event (e.g. QueryStatus).
 #[derive(Debug, Clone, PartialEq)]
+#[expect(clippy::large_enum_variant, reason = "no_std without alloc; OTA chunks are inline")]
 pub enum RouteAction {
     /// Send this EspnowMessage to the given role.
     SendTo { role: Role, msg: EspnowMessage },

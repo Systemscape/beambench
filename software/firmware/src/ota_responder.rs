@@ -135,7 +135,7 @@ async fn handle_begin(
     sha256: [u8; 32],
     ack_interval: u16,
 ) -> Option<EspnowMessage> {
-    let total_chunks = ((total_size + CHUNK_SIZE - 1) / CHUNK_SIZE) as u16;
+    let total_chunks = total_size.div_ceil(CHUNK_SIZE) as u16;
     let ack_interval = ack_interval.max(1); // Ensure at least 1.
     info!(
         "OTA begin: {} bytes, {} chunks, ack every {} chunks",
@@ -146,7 +146,7 @@ async fn handle_begin(
 
     // Read partition table to find the inactive OTA slot.
     let mut pt_buf = [0u8; partitions::PARTITION_TABLE_MAX_LEN];
-    let pt = match partitions::read_partition_table(&mut *f, &mut pt_buf) {
+    let pt = match partitions::read_partition_table(&mut f, &mut pt_buf) {
         Ok(pt) => pt,
         Err(e) => {
             defmt::error!(
@@ -278,7 +278,7 @@ async fn handle_data(
     // Windowed ack: only ack on interval boundaries and the last chunk.
     let chunk_num = seq + 1; // 1-based count
     let is_last = chunk_num >= session.total_chunks;
-    let is_interval = chunk_num % session.ack_interval == 0;
+    let is_interval = chunk_num.is_multiple_of(session.ack_interval);
     if is_interval || is_last {
         Some(EspnowMessage::OtaAck { seq })
     } else {
@@ -314,7 +314,7 @@ async fn handle_finish(
     let mut f = flash.lock().await;
     let mut pt_buf = [0u8; partitions::PARTITION_TABLE_MAX_LEN];
     let mut updater =
-        match esp_bootloader_esp_idf::ota_updater::OtaUpdater::new(&mut *f, &mut pt_buf) {
+        match esp_bootloader_esp_idf::ota_updater::OtaUpdater::new(&mut f, &mut pt_buf) {
             Ok(u) => u,
             Err(e) => {
                 defmt::error!("OtaUpdater init failed: {:?}", defmt::Debug2Format(&e));
