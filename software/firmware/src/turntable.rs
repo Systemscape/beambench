@@ -34,9 +34,9 @@ enum MotorResult {
 pub async fn run(
     spawner: Spawner,
     motor: &'static Mutex<NoopRawMutex, StepDirMotor<'static>>,
-    manager: &'static EspNowManager<'static>,
-    sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
-    receiver: EspNowReceiver<'static>,
+    manager: &'static EspNowManager,
+    sender: &'static Mutex<NoopRawMutex, EspNowSender>,
+    receiver: EspNowReceiver,
     led_signal: &'static Signal<NoopRawMutex, LedState>,
     flash: &'static SharedFlash,
 ) -> ! {
@@ -49,17 +49,12 @@ pub async fn run(
         Mutex::new(crate::ota_responder::OtaState::new())
     );
 
-    spawner
-        .spawn(turntable_discovery_task(
-            sender,
-            bridge_mac,
-            last_bridge_seen,
-            manager,
-            led_signal,
-        ))
-        .ok();
-    spawner
-        .spawn(turntable_listener_task(
+    spawner.spawn(
+        turntable_discovery_task(sender, bridge_mac, last_bridge_seen, manager, led_signal)
+            .unwrap(),
+    );
+    spawner.spawn(
+        turntable_listener_task(
             manager,
             sender,
             receiver,
@@ -69,19 +64,11 @@ pub async fn run(
             flash,
             ota,
             led_signal,
-        ))
-        .ok();
-    spawner
-        .spawn(turntable_responder_task(sender, bridge_mac, motor_result))
-        .ok();
-    spawner
-        .spawn(motor_task_step_dir(
-            motor,
-            motor_cmd,
-            motor_result,
-            led_signal,
-        ))
-        .ok();
+        )
+        .unwrap(),
+    );
+    spawner.spawn(turntable_responder_task(sender, bridge_mac, motor_result).unwrap());
+    spawner.spawn(motor_task_step_dir(motor, motor_cmd, motor_result, led_signal).unwrap());
 
     info!("Turntable controller ready, discovering Bridge...");
 
@@ -92,10 +79,10 @@ pub async fn run(
 
 #[embassy_executor::task]
 async fn turntable_discovery_task(
-    sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
+    sender: &'static Mutex<NoopRawMutex, EspNowSender>,
     bridge_mac: &'static Mutex<NoopRawMutex, Option<[u8; 6]>>,
     last_bridge_seen: &'static Mutex<NoopRawMutex, Option<Instant>>,
-    manager: &'static EspNowManager<'static>,
+    manager: &'static EspNowManager,
     led_signal: &'static Signal<NoopRawMutex, LedState>,
 ) {
     let mut buf = [0u8; proto::MAX_MSG_SIZE];
@@ -135,9 +122,9 @@ async fn turntable_discovery_task(
 
 #[embassy_executor::task]
 async fn turntable_listener_task(
-    manager: &'static EspNowManager<'static>,
-    sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
-    mut receiver: EspNowReceiver<'static>,
+    manager: &'static EspNowManager,
+    sender: &'static Mutex<NoopRawMutex, EspNowSender>,
+    mut receiver: EspNowReceiver,
     bridge_mac: &'static Mutex<NoopRawMutex, Option<[u8; 6]>>,
     last_bridge_seen: &'static Mutex<NoopRawMutex, Option<Instant>>,
     motor_cmd: &'static Signal<NoopRawMutex, MotorCmd>,
@@ -204,7 +191,7 @@ async fn turntable_listener_task(
 
 #[embassy_executor::task]
 async fn turntable_responder_task(
-    sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
+    sender: &'static Mutex<NoopRawMutex, EspNowSender>,
     bridge_mac: &'static Mutex<NoopRawMutex, Option<[u8; 6]>>,
     result_signal: &'static Signal<NoopRawMutex, MotorResult>,
 ) {

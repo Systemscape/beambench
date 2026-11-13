@@ -475,6 +475,20 @@ mod test {
         assert_eq!(&decoded, msg);
     }
 
+    /// Pins the wire format of one command, byte for byte.
+    #[test]
+    fn move_to_wire_bytes() {
+        let cmd = PcCommand::MoveTo { angle_deg: 90.0 };
+        let mut buf = [0u8; MAX_MSG_SIZE];
+
+        // Variant index 3, then 90.0f32 little-endian.
+        let plain = super::serialize(&cmd, &mut buf).unwrap();
+        assert_eq!(plain, [0x03, 0x00, 0x00, 0xB4, 0x42]);
+
+        let len = super::serialize_cobs(&cmd, &mut buf).unwrap();
+        assert_eq!(buf[..len], [0x02, 0x03, 0x01, 0x03, 0xB4, 0x42, 0x00]);
+    }
+
     #[test]
     fn cobs_round_trip() {
         let mut buf = [0u8; MAX_MSG_SIZE];

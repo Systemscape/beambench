@@ -8,9 +8,7 @@ use defmt::info;
 use embassy_executor::Spawner;
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, mutex::Mutex, signal::Signal};
 use embassy_time::{Duration, Instant, Timer};
-use esp_radio::esp_now::{
-    EspNowManager, EspNowReceiver, EspNowSender, BROADCAST_ADDRESS,
-};
+use esp_radio::esp_now::{BROADCAST_ADDRESS, EspNowManager, EspNowReceiver, EspNowSender};
 
 use beambench_protocol::{self as proto, EspnowMessage, Role};
 
@@ -28,9 +26,9 @@ struct TxState {
 #[cfg(not(feature = "backend-uart"))]
 pub async fn run(
     spawner: Spawner,
-    manager: &'static EspNowManager<'static>,
-    sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
-    receiver: EspNowReceiver<'static>,
+    manager: &'static EspNowManager,
+    sender: &'static Mutex<NoopRawMutex, EspNowSender>,
+    receiver: EspNowReceiver,
     led_signal: &'static Signal<NoopRawMutex, LedState>,
     flash: &'static SharedFlash,
 ) -> ! {
@@ -49,9 +47,9 @@ pub async fn run(
 #[cfg(feature = "backend-uart")]
 pub async fn run(
     spawner: Spawner,
-    manager: &'static EspNowManager<'static>,
-    sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
-    receiver: EspNowReceiver<'static>,
+    manager: &'static EspNowManager,
+    sender: &'static Mutex<NoopRawMutex, EspNowSender>,
+    receiver: EspNowReceiver,
     led_signal: &'static Signal<NoopRawMutex, LedState>,
     flash: &'static SharedFlash,
     uart: esp_hal::uart::Uart<'static, esp_hal::Async>,
@@ -70,9 +68,9 @@ pub async fn run(
 
 async fn run_inner(
     spawner: Spawner,
-    manager: &'static EspNowManager<'static>,
-    sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
-    receiver: EspNowReceiver<'static>,
+    manager: &'static EspNowManager,
+    sender: &'static Mutex<NoopRawMutex, EspNowSender>,
+    receiver: EspNowReceiver,
     led_signal: &'static Signal<NoopRawMutex, LedState>,
     flash: &'static SharedFlash,
     backend: ActiveTxBackend,
@@ -91,12 +89,13 @@ async fn run_inner(
         Mutex::new(crate::ota_responder::OtaState::new())
     );
 
-    spawner.spawn(tx_discovery_task(manager, sender, state, led_signal)).ok();
-    spawner.spawn(tx_listener_task(manager, sender, receiver, state, led_signal, flash, ota)).ok();
+    spawner.spawn(tx_discovery_task(manager, sender, state, led_signal).unwrap());
+    spawner
+        .spawn(tx_listener_task(manager, sender, receiver, state, led_signal, flash, ota).unwrap());
 
     // ESP-NOW backend: spawn the beacon broadcast loop.
     #[cfg(not(feature = "backend-uart"))]
-    spawner.spawn(tx_transmit_task(sender, state)).ok();
+    spawner.spawn(tx_transmit_task(sender, state).unwrap());
 
     info!("TX role ready, broadcasting discovery beacons");
 
@@ -107,8 +106,8 @@ async fn run_inner(
 
 #[embassy_executor::task]
 async fn tx_discovery_task(
-    manager: &'static EspNowManager<'static>,
-    sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
+    manager: &'static EspNowManager,
+    sender: &'static Mutex<NoopRawMutex, EspNowSender>,
     state: &'static Mutex<NoopRawMutex, TxState>,
     led_signal: &'static Signal<NoopRawMutex, LedState>,
 ) {
@@ -149,9 +148,9 @@ async fn tx_discovery_task(
 
 #[embassy_executor::task]
 async fn tx_listener_task(
-    manager: &'static EspNowManager<'static>,
-    sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
-    mut receiver: EspNowReceiver<'static>,
+    manager: &'static EspNowManager,
+    sender: &'static Mutex<NoopRawMutex, EspNowSender>,
+    mut receiver: EspNowReceiver,
     state: &'static Mutex<NoopRawMutex, TxState>,
     led_signal: &'static Signal<NoopRawMutex, LedState>,
     flash: &'static SharedFlash,
@@ -208,7 +207,15 @@ async fn tx_listener_task(
             }
             Ok(ref espnow_msg) if crate::ota_responder::is_ota_message(espnow_msg) => {
                 let bridge_mac = state.lock().await.bridge_mac;
-                crate::ota_responder::process_and_respond(espnow_msg, ota, flash, sender, &bridge_mac, led_signal).await;
+                crate::ota_responder::process_and_respond(
+                    espnow_msg,
+                    ota,
+                    flash,
+                    sender,
+                    &bridge_mac,
+                    led_signal,
+                )
+                .await;
             }
             _ => {}
         }
@@ -219,7 +226,7 @@ async fn tx_listener_task(
 #[cfg(not(feature = "backend-uart"))]
 #[embassy_executor::task]
 async fn tx_transmit_task(
-    sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
+    sender: &'static Mutex<NoopRawMutex, EspNowSender>,
     state: &'static Mutex<NoopRawMutex, TxState>,
 ) {
     let mut buf = [0u8; proto::MAX_MSG_SIZE];

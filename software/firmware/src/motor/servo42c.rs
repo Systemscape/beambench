@@ -1,5 +1,5 @@
 use embedded_io::Write;
-use esp_hal::{delay::Delay, uart::Uart, Blocking};
+use esp_hal::{Blocking, delay::Delay, uart::Uart};
 use mks_servo42_rs::{self, Driver, RotationDirection};
 
 use super::{Motor, MotorError, Position};
@@ -31,7 +31,9 @@ impl<'a> Servo42cMotor<'a> {
     /// Write a command and read the response into `buf`.
     /// Returns the number of bytes read.
     fn transact(&mut self, cmd: &[u8], buf: &mut [u8]) -> Result<usize, MotorError> {
-        self.uart.write_all(cmd).map_err(|_| MotorError::Communication)?;
+        self.uart
+            .write_all(cmd)
+            .map_err(|_| MotorError::Communication)?;
         self.uart.flush().map_err(|_| MotorError::Communication)?;
 
         // Give the motor time to respond.
@@ -70,7 +72,10 @@ impl Motor for Servo42cMotor<'_> {
                 }
             }
         }
-        defmt::warn!("Failed to {} motor", if enabled { "enable" } else { "disable" });
+        defmt::warn!(
+            "Failed to {} motor",
+            if enabled { "enable" } else { "disable" }
+        );
     }
 
     fn go_to(&mut self, target: Position) -> Result<Position, MotorError> {
@@ -89,7 +94,9 @@ impl Motor for Servo42cMotor<'_> {
         let pulses = delta.unsigned_abs();
 
         let mut cmd_buf = [0u8; MAX_CMD_LEN];
-        let cmd = self.driver.run_motor(direction, MOVE_SPEED, pulses)
+        let cmd = self
+            .driver
+            .run_motor(direction, MOVE_SPEED, pulses)
             .map_err(|_| MotorError::OutOfRange)?;
         let len = cmd.len();
         cmd_buf[..len].copy_from_slice(cmd);

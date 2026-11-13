@@ -11,8 +11,8 @@
 
 use defmt::info;
 use embassy_time::Duration;
-use esp_hal::uart::Uart;
 use esp_hal::Async;
+use esp_hal::uart::Uart;
 
 use super::{MeasurementResult, RxBackend, TxBackend};
 

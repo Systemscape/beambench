@@ -15,15 +15,13 @@ use embassy_sync::{
 use embassy_time::{Duration, Instant, Timer};
 use embedded_io_async::{Read, Write};
 use esp_hal::{
-    usb_serial_jtag::{UsbSerialJtagRx, UsbSerialJtagTx},
     Async,
+    usb::usb_serial_jtag::{UsbSerialJtagRx, UsbSerialJtagTx},
 };
-use esp_radio::esp_now::{
-    EspNowManager, EspNowReceiver, EspNowSender, BROADCAST_ADDRESS,
-};
+use esp_radio::esp_now::{BROADCAST_ADDRESS, EspNowManager, EspNowReceiver, EspNowSender};
 
-use beambench_protocol::{self as proto, DeviceEvent, EspnowMessage, PcCommand, Role};
 use beambench_protocol::bridge_logic;
+use beambench_protocol::{self as proto, DeviceEvent, EspnowMessage, PcCommand, Role};
 
 use crate::common::*;
 use crate::mk_static;
@@ -102,9 +100,9 @@ impl PeerTable {
 
 pub async fn run(
     spawner: Spawner,
-    manager: &'static EspNowManager<'static>,
-    sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
-    receiver: EspNowReceiver<'static>,
+    manager: &'static EspNowManager,
+    sender: &'static Mutex<NoopRawMutex, EspNowSender>,
+    receiver: EspNowReceiver,
     led_signal: &'static Signal<NoopRawMutex, LedState>,
     usb_rx: &'static mut UsbSerialJtagRx<'static, Async>,
     usb_tx: &'static mut UsbSerialJtagTx<'static, Async>,
@@ -117,31 +115,22 @@ pub async fn run(
     // Channel for DeviceEvent responses to send over serial.
     let event_ch = mk_static!(Channel::<NoopRawMutex, DeviceEvent, 8>, Channel::new());
 
-    spawner
-        .spawn(bridge_discovery_task(manager, sender, peers, led_signal))
-        .ok();
-    spawner
-        .spawn(bridge_listener_task(
+    spawner.spawn(bridge_discovery_task(manager, sender, peers, led_signal).unwrap());
+    spawner.spawn(
+        bridge_listener_task(
             manager,
             sender,
             receiver,
             peers,
             event_ch.sender(),
             led_signal,
-        ))
-        .ok();
-    spawner
-        .spawn(bridge_serial_rx_task(
-            usb_rx,
-            sender,
-            peers,
-            event_ch.sender(),
-            led_signal,
-        ))
-        .ok();
-    spawner
-        .spawn(bridge_serial_tx_task(usb_tx, event_ch.receiver()))
-        .ok();
+        )
+        .unwrap(),
+    );
+    spawner.spawn(
+        bridge_serial_rx_task(usb_rx, sender, peers, event_ch.sender(), led_signal).unwrap(),
+    );
+    spawner.spawn(bridge_serial_tx_task(usb_tx, event_ch.receiver()).unwrap());
 
     info!("Bridge role ready, discovering peers...");
 
@@ -156,7 +145,7 @@ pub async fn run(
 #[embassy_executor::task]
 async fn bridge_serial_rx_task(
     usb_rx: &'static mut UsbSerialJtagRx<'static, Async>,
-    sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
+    sender: &'static Mutex<NoopRawMutex, EspNowSender>,
     peers: &'static Mutex<NoopRawMutex, PeerTable>,
     event_tx: Sender<'static, NoopRawMutex, DeviceEvent, 8>,
     led_signal: &'static Signal<NoopRawMutex, LedState>,
@@ -203,14 +192,17 @@ async fn bridge_serial_rx_task(
 /// Translates a PcCommand into ESP-NOW messages and sends to the appropriate peer.
 async fn handle_pc_command(
     cmd: PcCommand,
-    sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
+    sender: &'static Mutex<NoopRawMutex, EspNowSender>,
     peers: &'static Mutex<NoopRawMutex, PeerTable>,
     event_tx: &Sender<'static, NoopRawMutex, DeviceEvent, 8>,
     led_signal: &'static Signal<NoopRawMutex, LedState>,
 ) {
     if matches!(cmd, PcCommand::OtaBegin { .. }) {
         OTA_IN_PROGRESS.store(true, core::sync::atomic::Ordering::Relaxed);
-        led_signal.signal(LedState::Blink { color: COLOR_RED, period_ms: 200 });
+        led_signal.signal(LedState::Blink {
+            color: COLOR_RED,
+            period_ms: 200,
+        });
     }
     match bridge_logic::route_command(&cmd) {
         bridge_logic::RouteAction::SendTo { role, msg } => {
@@ -226,7 +218,7 @@ async fn handle_pc_command(
 
 /// Send an EspnowMessage to a peer by role. Sends an error event if the peer is not connected.
 async fn send_to_role(
-    sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
+    sender: &'static Mutex<NoopRawMutex, EspNowSender>,
     peers: &'static Mutex<NoopRawMutex, PeerTable>,
     role: Role,
     msg: &EspnowMessage,
@@ -242,7 +234,9 @@ async fn send_to_role(
             Role::Turntable => "Turntable",
             Role::Bridge => "Bridge",
         });
-        event_tx.send(DeviceEvent::Error { description: desc }).await;
+        event_tx
+            .send(DeviceEvent::Error { description: desc })
+            .await;
         return;
     };
 
@@ -279,8 +273,8 @@ async fn bridge_serial_tx_task(
 
 #[embassy_executor::task]
 async fn bridge_discovery_task(
-    manager: &'static EspNowManager<'static>,
-    sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
+    manager: &'static EspNowManager,
+    sender: &'static Mutex<NoopRawMutex, EspNowSender>,
     peers: &'static Mutex<NoopRawMutex, PeerTable>,
     led_signal: &'static Signal<NoopRawMutex, LedState>,
 ) {
@@ -298,7 +292,9 @@ async fn bridge_discovery_task(
         {
             let mut p = peers.lock().await;
             for role in [Role::Rx, Role::Tx, Role::Turntable] {
-                let stale = p.entry(role).map_or(false, |(_, t)| is_heartbeat_stale(Some(t)));
+                let stale = p
+                    .entry(role)
+                    .map_or(false, |(_, t)| is_heartbeat_stale(Some(t)));
                 if stale {
                     if let Some(mac) = p.peer_for_role(role) {
                         info!(
@@ -330,9 +326,9 @@ async fn bridge_discovery_task(
 
 #[embassy_executor::task]
 async fn bridge_listener_task(
-    manager: &'static EspNowManager<'static>,
-    sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
-    mut receiver: EspNowReceiver<'static>,
+    manager: &'static EspNowManager,
+    sender: &'static Mutex<NoopRawMutex, EspNowSender>,
+    mut receiver: EspNowReceiver,
     peers: &'static Mutex<NoopRawMutex, PeerTable>,
     event_tx: Sender<'static, NoopRawMutex, DeviceEvent, 8>,
     led_signal: &'static Signal<NoopRawMutex, LedState>,
@@ -352,7 +348,12 @@ async fn bridge_listener_task(
                     info!(
                         "Discovered {:?} at {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
                         defmt::Debug2Format(&role),
-                        src[0], src[1], src[2], src[3], src[4], src[5]
+                        src[0],
+                        src[1],
+                        src[2],
+                        src[3],
+                        src[4],
+                        src[5]
                     );
                     ensure_peer(manager, &src);
                     peers.lock().await.set_peer(role, src);
@@ -390,7 +391,10 @@ async fn bridge_listener_task(
                     }
                 }
                 // Restore LED after OTA completes or fails.
-                if matches!(espnow_msg, EspnowMessage::OtaComplete | EspnowMessage::OtaError { .. }) {
+                if matches!(
+                    espnow_msg,
+                    EspnowMessage::OtaComplete | EspnowMessage::OtaError { .. }
+                ) {
                     OTA_IN_PROGRESS.store(false, core::sync::atomic::Ordering::Relaxed);
                     let all = peers.lock().await.all_connected();
                     signal_pairing_led(led_signal, all);

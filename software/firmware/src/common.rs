@@ -1,8 +1,8 @@
 //! Shared code for all firmware roles: LED control, ESP-NOW init, discovery helpers.
 
-use embassy_futures::select::{select, Either};
+use embassy_futures::select::{Either, select};
 use embassy_time::{Duration, Timer};
-use smart_leds::{SmartLedsWrite, RGB8};
+use smart_leds::{RGB8, SmartLedsWrite};
 
 use core::sync::atomic::{AtomicBool, Ordering};
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, signal::Signal};
@@ -91,7 +91,7 @@ pub fn ensure_peer(manager: &esp_radio::esp_now::EspNowManager, mac: &[u8; 6]) {
     if !manager.peer_exists(mac) {
         manager
             .add_peer(esp_radio::esp_now::PeerInfo {
-                interface: esp_radio::esp_now::EspNowWifiInterface::Sta,
+                interface: esp_radio::esp_now::EspNowWifiInterface::Station,
                 peer_address: *mac,
                 lmk: None,
                 channel: None,
@@ -103,10 +103,7 @@ pub fn ensure_peer(manager: &esp_radio::esp_now::EspNowManager, mac: &[u8; 6]) {
 
 /// Signal LED to reflect pairing state: solid green when paired, blinking blue otherwise.
 /// Skipped while OTA is in progress to avoid overriding the red blink.
-pub fn signal_pairing_led(
-    led_signal: &Signal<NoopRawMutex, LedState>,
-    paired: bool,
-) {
+pub fn signal_pairing_led(led_signal: &Signal<NoopRawMutex, LedState>, paired: bool) {
     if OTA_IN_PROGRESS.load(Ordering::Relaxed) {
         return;
     }

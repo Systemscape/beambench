@@ -11,5 +11,5 @@ defmt = ["dep:defmt", "heapless/defmt"]
 serde = { version = "1", default-features = false, features = ["derive"] }
 postcard = "1"
 # heapless provides fixed-capacity String/Vec for no_std contexts
-heapless = { version = "0.9.2", features = ["serde"] }
-defmt = { version = "1.0.1", optional = true }
+heapless = { version = "0.9.3", features = ["serde"] }
+defmt = { version = "1.2.0", optional = true }

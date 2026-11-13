@@ -12,8 +12,8 @@ use sha2::{Digest, Sha256};
 use beambench_protocol::{self as proto, EspnowMessage, OTA_CHUNK_SIZE};
 use esp_bootloader_esp_idf::partitions;
 
+use crate::common::{COLOR_GREEN, COLOR_RED, LedState, OTA_IN_PROGRESS, SharedFlash};
 use core::sync::atomic::Ordering;
-use crate::common::{SharedFlash, LedState, COLOR_RED, COLOR_GREEN, OTA_IN_PROGRESS};
 
 const CHUNK_SIZE: u32 = OTA_CHUNK_SIZE as u32;
 
@@ -72,9 +72,7 @@ pub async fn handle_ota_message(
 pub fn is_ota_message(msg: &EspnowMessage) -> bool {
     matches!(
         msg,
-        EspnowMessage::OtaBegin { .. }
-            | EspnowMessage::OtaData { .. }
-            | EspnowMessage::OtaFinish
+        EspnowMessage::OtaBegin { .. } | EspnowMessage::OtaData { .. } | EspnowMessage::OtaFinish
     )
 }
 
@@ -86,18 +84,24 @@ pub async fn process_and_respond(
     msg: &EspnowMessage,
     ota: &Mutex<NoopRawMutex, OtaState>,
     flash: &SharedFlash,
-    sender: &Mutex<NoopRawMutex, EspNowSender<'static>>,
+    sender: &Mutex<NoopRawMutex, EspNowSender>,
     bridge_mac: &[u8; 6],
     led_signal: &Signal<NoopRawMutex, LedState>,
 ) {
     // Start blinking red on OtaBegin.
     if matches!(msg, EspnowMessage::OtaBegin { .. }) {
         OTA_IN_PROGRESS.store(true, Ordering::Relaxed);
-        led_signal.signal(LedState::Blink { color: COLOR_RED, period_ms: 200 });
+        led_signal.signal(LedState::Blink {
+            color: COLOR_RED,
+            period_ms: 200,
+        });
     }
 
     if let Some(resp) = handle_ota_message(msg, ota, flash).await {
-        let is_done = matches!(resp, EspnowMessage::OtaComplete | EspnowMessage::OtaError { .. });
+        let is_done = matches!(
+            resp,
+            EspnowMessage::OtaComplete | EspnowMessage::OtaError { .. }
+        );
         send_ota_response(sender, bridge_mac, &resp).await;
         if matches!(resp, EspnowMessage::OtaComplete) {
             schedule_reboot().await;
@@ -111,7 +115,7 @@ pub async fn process_and_respond(
 
 /// Send an OTA response back to the Bridge.
 async fn send_ota_response(
-    sender: &Mutex<NoopRawMutex, EspNowSender<'static>>,
+    sender: &Mutex<NoopRawMutex, EspNowSender>,
     bridge_mac: &[u8; 6],
     msg: &EspnowMessage,
 ) {
@@ -145,7 +149,10 @@ async fn handle_begin(
     let pt = match partitions::read_partition_table(&mut *f, &mut pt_buf) {
         Ok(pt) => pt,
         Err(e) => {
-            defmt::error!("Failed to read partition table: {:?}", defmt::Debug2Format(&e));
+            defmt::error!(
+                "Failed to read partition table: {:?}",
+                defmt::Debug2Format(&e)
+            );
             return Some(ota_error("partition table read failed"));
         }
     };
@@ -194,8 +201,7 @@ async fn handle_begin(
 
     info!(
         "Writing to OTA slot at offset 0x{:X} ({} bytes available)",
-        target_offset,
-        target_size
+        target_offset, target_size
     );
 
     // Pre-erase the needed flash region. This is much faster than per-write
@@ -243,7 +249,11 @@ async fn handle_data(
 
     let offset = seq as u32 * CHUNK_SIZE;
     if offset + data.len() as u32 > session.partition_size {
-        defmt::error!("OTA chunk out of bounds: offset {} + len {}", offset, data.len());
+        defmt::error!(
+            "OTA chunk out of bounds: offset {} + len {}",
+            offset,
+            data.len()
+        );
         return Some(ota_error("chunk out of bounds"));
     }
 
@@ -255,7 +265,11 @@ async fn handle_data(
     // Write to flash (pre-erased in handle_begin, so use NorFlash::write directly).
     let mut f = flash.lock().await;
     if let Err(e) = NorFlash::write(&mut *f, flash_addr, data.as_slice()) {
-        defmt::error!("Flash write failed at 0x{:X}: {:?}", flash_addr, defmt::Debug2Format(&e));
+        defmt::error!(
+            "Flash write failed at 0x{:X}: {:?}",
+            flash_addr,
+            defmt::Debug2Format(&e)
+        );
         drop(f);
         state.session = None;
         return Some(ota_error("flash write failed"));
@@ -299,16 +313,20 @@ async fn handle_finish(
     // Switch the OTA slot.
     let mut f = flash.lock().await;
     let mut pt_buf = [0u8; partitions::PARTITION_TABLE_MAX_LEN];
-    let mut updater = match esp_bootloader_esp_idf::ota_updater::OtaUpdater::new(&mut *f, &mut pt_buf) {
-        Ok(u) => u,
-        Err(e) => {
-            defmt::error!("OtaUpdater init failed: {:?}", defmt::Debug2Format(&e));
-            return Some(ota_error("ota updater init failed"));
-        }
-    };
+    let mut updater =
+        match esp_bootloader_esp_idf::ota_updater::OtaUpdater::new(&mut *f, &mut pt_buf) {
+            Ok(u) => u,
+            Err(e) => {
+                defmt::error!("OtaUpdater init failed: {:?}", defmt::Debug2Format(&e));
+                return Some(ota_error("ota updater init failed"));
+            }
+        };
 
     if let Err(e) = updater.activate_next_partition() {
-        defmt::error!("Failed to activate partition: {:?}", defmt::Debug2Format(&e));
+        defmt::error!(
+            "Failed to activate partition: {:?}",
+            defmt::Debug2Format(&e)
+        );
         return Some(ota_error("partition activation failed"));
     }
 
@@ -339,9 +357,9 @@ pub fn mark_current_valid(flash: &mut esp_storage::FlashStorage<'_>) {
     let updater = esp_bootloader_esp_idf::ota_updater::OtaUpdater::new(flash, &mut pt_buf);
     match updater {
         Ok(mut u) => {
-            if let Err(e) = u.set_current_ota_state(
-                esp_bootloader_esp_idf::ota::OtaImageState::Valid,
-            ) {
+            if let Err(e) =
+                u.set_current_ota_state(esp_bootloader_esp_idf::ota::OtaImageState::Valid)
+            {
                 // Not fatal — might be first boot from factory partition.
                 defmt::debug!(
                     "Could not set OTA state to Valid: {:?}",
