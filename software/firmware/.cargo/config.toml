@@ -6,9 +6,6 @@ rustflags = [
   "-C", "link-arg=-Tlinkall.x",
 ]
 
-[unstable]
-build-std = ["core", "alloc"]
-
 [target.riscv32imc-unknown-none-elf]
 runner = "probe-rs run --chip esp32c3 --always-print-stacktrace"
 
