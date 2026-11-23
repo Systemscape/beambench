@@ -27,7 +27,7 @@ run: build
 
 # Run RX simulator
 sim:
-    cargo run --bin rx-sim --features sim
+    cargo run --bin bridge-sim --features sim
 
 # Check Rust code only
 check:

@@ -5,8 +5,8 @@ edition = "2024"
 default-run = "beambench-pc"
 
 [[bin]]
-name = "rx-sim"
-path = "src/bin/rx-sim.rs"
+name = "bridge-sim"
+path = "src/bin/bridge-sim.rs"
 required-features = ["sim"]
 
 [features]
@@ -42,7 +42,7 @@ clap = { version = "4", features = ["derive"] }
 # MIME type detection for static file serving
 mime_guess = "2"
 
-# Heapless strings (used by rx-sim for protocol Error messages)
+# Heapless strings (used by bridge-sim for protocol Error messages)
 heapless = "0.9.3"
 
 # SHA-256 for OTA firmware verification

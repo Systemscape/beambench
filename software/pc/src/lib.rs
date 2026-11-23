@@ -117,11 +117,11 @@ pub enum WsEvent {
 pub enum WsCommand {
     /// Start a new antenna pattern sweep with the given configuration.
     StartSweep(SweepConfig),
-    /// Forward TX radio configuration to the TX board via the RX bridge.
+    /// Forward TX radio configuration to the TX board via the bridge.
     ConfigureTx(TxConfig),
     /// Abort the current sweep immediately.
     Stop,
-    /// Request a fresh status snapshot from the RX board.
+    /// Request a fresh status snapshot from the bridge.
     QueryStatus,
     /// List available serial ports (response sent via REST, not WS).
     ListPorts,
