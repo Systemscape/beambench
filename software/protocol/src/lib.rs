@@ -337,67 +337,6 @@ pub struct PeerMismatch {
     pub protocol: u16,
 }
 
-// ── Serial protocol v1 (PC ↔ RX, legacy) ───────────────────────────────────
-
-/// Command from PC to RX board (over USB-serial).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub enum PcToRx {
-    /// Start an antenna pattern sweep.
-    StartSweep {
-        /// Start angle in degrees.
-        start_deg: f32,
-        /// Stop angle in degrees.
-        stop_deg: f32,
-        /// Angular step size in degrees.
-        step_deg: f32,
-        /// Number of RSSI samples to average per angle.
-        samples_per_angle: u16,
-    },
-    /// Configure the TX board (forwarded via ESPNOW).
-    ConfigureTx {
-        channel: u8,
-        tx_power_dbm: i8,
-        packet_rate_hz: u16,
-    },
-    /// Abort the current sweep.
-    Stop,
-    /// Request status from RX.
-    QueryStatus,
-    /// Return turntable to home (0°) position.
-    ReturnHome,
-}
-
-/// Message from RX board to PC (over USB-serial).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub enum RxToPc {
-    /// One measurement data point.
-    DataPoint {
-        /// Turntable angle in degrees.
-        angle_deg: f32,
-        /// Measured RSSI in dBm (averaged).
-        rssi_dbm: f32,
-        /// Number of samples actually collected.
-        sample_count: u16,
-    },
-    /// Sweep finished successfully.
-    SweepComplete,
-    /// Turntable reached home (0°) after a `PcToRx::ReturnHome` command.
-    HomeComplete,
-    /// Error during operation.
-    Error { description: String<128> },
-    /// Status report.
-    Status {
-        /// Whether a sweep is in progress.
-        sweeping: bool,
-        /// Whether TX peer is connected.
-        tx_connected: bool,
-        /// Whether turntable peer is connected.
-        turntable_connected: bool,
-    },
-}
-
 // ── Turntable angle conversion (pure math, testable on host) ─────────────────
 
 pub mod turntable {
@@ -474,8 +413,8 @@ mod test {
 
     use crate::{
         BackendInfo, DecodeError, DeviceEvent, EspnowMessage, HelloBeacon, MAX_MSG_SIZE,
-        PairConfirm, PcCommand, PcToRx, PeerMismatch, Role, RxToPc, TurntableCommand,
-        TurntableResponse, TxCommand, TxResponse,
+        PairConfirm, PcCommand, PeerMismatch, Role, TurntableCommand, TurntableResponse, TxCommand,
+        TxResponse,
     };
 
     /// Serialize `msg` into `buf` with postcard, then deserialize and assert equality.
@@ -491,70 +430,6 @@ mod test {
             &msg_deser, msg,
             "Deserialized message should match the one that has been serialized"
         )
-    }
-
-    #[test]
-    fn check_max_msg_size_postcard() {
-        let mut buf = [0u8; MAX_MSG_SIZE];
-
-        // RxToPc variants
-        test_ser_deser(
-            &RxToPc::Status {
-                sweeping: true,
-                tx_connected: true,
-                turntable_connected: true,
-            },
-            &mut buf,
-        );
-
-        test_ser_deser(
-            &RxToPc::Error {
-                description: String::try_from(
-                    "ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNOPQRSTUVWXYZ\
-                     ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNOPQRSTUVWXYZ\
-                     ABCDEFGHIJKLMNOPQRSTUVWX",
-                )
-                .expect("Convert &str to heapless string"),
-            },
-            &mut buf,
-        );
-
-        test_ser_deser(
-            &RxToPc::DataPoint {
-                angle_deg: 45.0,
-                rssi_dbm: -42.5,
-                sample_count: 10,
-            },
-            &mut buf,
-        );
-
-        test_ser_deser(&RxToPc::SweepComplete, &mut buf);
-
-        test_ser_deser(&RxToPc::HomeComplete, &mut buf);
-
-        // PcToRx variants
-        test_ser_deser(
-            &PcToRx::StartSweep {
-                start_deg: 0.0,
-                stop_deg: 180.0,
-                step_deg: 10.0,
-                samples_per_angle: 100,
-            },
-            &mut buf,
-        );
-
-        test_ser_deser(
-            &PcToRx::ConfigureTx {
-                channel: 6,
-                tx_power_dbm: 20,
-                packet_rate_hz: 100,
-            },
-            &mut buf,
-        );
-
-        test_ser_deser(&PcToRx::Stop, &mut buf);
-
-        test_ser_deser(&PcToRx::QueryStatus, &mut buf);
     }
 
     /// Serialize with COBS, verify zero-delimiter, deserialize and check equality.
@@ -599,58 +474,6 @@ mod test {
         assert_eq!(
             super::deserialize_cobs::<PcCommand>(&mut frame),
             Err(DecodeError::VersionMismatch { protocol: 2 })
-        );
-    }
-
-    #[test]
-    fn cobs_round_trip() {
-        let mut buf = [0u8; MAX_MSG_SIZE];
-
-        // PcToRx variants
-        test_cobs_round_trip(
-            &PcToRx::StartSweep {
-                start_deg: 0.0,
-                stop_deg: 360.0,
-                step_deg: 5.0,
-                samples_per_angle: 50,
-            },
-            &mut buf,
-        );
-        test_cobs_round_trip(
-            &PcToRx::ConfigureTx {
-                channel: 1,
-                tx_power_dbm: -10,
-                packet_rate_hz: 200,
-            },
-            &mut buf,
-        );
-        test_cobs_round_trip(&PcToRx::Stop, &mut buf);
-        test_cobs_round_trip(&PcToRx::QueryStatus, &mut buf);
-
-        // RxToPc variants
-        test_cobs_round_trip(
-            &RxToPc::DataPoint {
-                angle_deg: 90.0,
-                rssi_dbm: -30.0,
-                sample_count: 25,
-            },
-            &mut buf,
-        );
-        test_cobs_round_trip(&RxToPc::SweepComplete, &mut buf);
-        test_cobs_round_trip(&RxToPc::HomeComplete, &mut buf);
-        test_cobs_round_trip(
-            &RxToPc::Error {
-                description: String::try_from("test error").unwrap(),
-            },
-            &mut buf,
-        );
-        test_cobs_round_trip(
-            &RxToPc::Status {
-                sweeping: false,
-                tx_connected: true,
-                turntable_connected: false,
-            },
-            &mut buf,
         );
     }
 
