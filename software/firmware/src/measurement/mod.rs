@@ -4,6 +4,7 @@
 //! The default backend is ESP-NOW RSSI; the `backend-uart` feature selects
 //! an external devboard connected over UART.
 
+#[cfg(not(feature = "backend-uart"))]
 pub mod espnow;
 #[cfg(feature = "backend-uart")]
 pub mod uart;

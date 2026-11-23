@@ -7,7 +7,7 @@
 //! Assumes the "sim" feature is activated
 
 use beambench_pc::sim;
-use beambench_pc::{export_csv, SweepConfig, WsEvent};
+use beambench_pc::{SweepConfig, WsEvent, export_csv};
 use tokio::sync::broadcast;
 
 #[tokio::test]

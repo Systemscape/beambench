@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use beambench_protocol::{DeviceEvent, PcCommand};
+use beambench_protocol::{DecodeError, DeviceEvent, PROTOCOL_VERSION, PcCommand};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Mutex, mpsc};
 use tokio_serial::SerialPortBuilderExt;
@@ -138,8 +138,15 @@ async fn reader_task<R: AsyncReadExt + Unpin>(
                         while let Some(zero_pos) = accum.iter().position(|&b| b == 0) {
                             let frame = &accum[..zero_pos + 1];
                             if frame.len() > 1 {
-                                match postcard::from_bytes_cobs(&mut frame.to_vec()) {
+                                match beambench_protocol::deserialize_cobs(&mut frame.to_vec()) {
                                     Ok(msg) => {
+                                        if responses.send(msg).await.is_err() {
+                                            return;
+                                        }
+                                    }
+                                    Err(DecodeError::VersionMismatch { protocol }) => {
+                                        let msg = mismatch_error(protocol);
+                                        warn!("{:?}", msg);
                                         if responses.send(msg).await.is_err() {
                                             return;
                                         }
@@ -163,6 +170,16 @@ async fn reader_task<R: AsyncReadExt + Unpin>(
                 return;
             }
         }
+    }
+}
+
+/// Error event for a frame from a bridge with another protocol version.
+fn mismatch_error(protocol: u16) -> DeviceEvent {
+    let text = format!(
+        "Protocol mismatch: bridge speaks v{protocol}, PC v{PROTOCOL_VERSION}. Reflash the bridge."
+    );
+    DeviceEvent::Error {
+        description: heapless::String::try_from(text.as_str()).unwrap_or_default(),
     }
 }
 
@@ -236,7 +253,7 @@ mod tests {
 
     #[tokio::test]
     async fn reader_decodes_single_frame() {
-        let msg = DeviceEvent::HomeComplete;
+        let msg = DeviceEvent::TxAck;
         let frame = encode_cobs_frame(&msg);
 
         let (resp_tx, mut resp_rx) = mpsc::channel::<DeviceEvent>(16);
@@ -249,8 +266,27 @@ mod tests {
         writer.write_all(&frame).await.unwrap();
         drop(writer);
 
-        let decoded = resp_rx.recv().await.expect("should receive decoded message");
+        let decoded = resp_rx
+            .recv()
+            .await
+            .expect("should receive decoded message");
         assert_eq!(decoded, msg);
+    }
+
+    #[tokio::test]
+    async fn reader_reports_version_mismatch() {
+        // COBS frame with version 2 and a payload this PC cannot parse.
+        let frame = [0x03, 0x02, 0xFF, 0x00];
+
+        let (resp_tx, mut resp_rx) = mpsc::channel::<DeviceEvent>(16);
+        let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let (mut writer, reader) = tokio::io::duplex(1024);
+        tokio::spawn(reader_task(reader, resp_tx, cancel_rx));
+
+        writer.write_all(&frame).await.unwrap();
+        drop(writer);
+
+        assert_eq!(resp_rx.recv().await, Some(mismatch_error(2)));
     }
 
     #[tokio::test]
@@ -276,7 +312,10 @@ mod tests {
         writer.write_all(&frame[mid..]).await.unwrap();
         drop(writer);
 
-        let decoded = resp_rx.recv().await.expect("should reassemble fragmented frame");
+        let decoded = resp_rx
+            .recv()
+            .await
+            .expect("should reassemble fragmented frame");
         assert_eq!(decoded, msg);
     }
 
@@ -295,18 +334,21 @@ mod tests {
         tokio::task::yield_now().await;
 
         // Now write a valid frame — reader should have reset and decode this.
-        let msg = DeviceEvent::HomeComplete;
+        let msg = DeviceEvent::TxAck;
         let frame = encode_cobs_frame(&msg);
         writer.write_all(&frame).await.unwrap();
         drop(writer);
 
-        let decoded = resp_rx.recv().await.expect("should decode frame after reset");
+        let decoded = resp_rx
+            .recv()
+            .await
+            .expect("should decode frame after reset");
         assert_eq!(decoded, msg);
     }
 
     #[tokio::test]
     async fn reader_handles_multiple_frames_in_one_read() {
-        let msg1 = DeviceEvent::HomeComplete;
+        let msg1 = DeviceEvent::TxAck;
         let msg2 = DeviceEvent::Measurement {
             rssi_dbm: -50.0,
             sample_count: 5,

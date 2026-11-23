@@ -73,6 +73,29 @@ pub struct SystemStatus {
     pub backend_freq_mhz: Option<u16>,
     /// Motor-to-turntable gear ratio (motor_deg = turntable_deg × ratio).
     pub transmission_ratio: f32,
+    /// Protocol version of this PC app.
+    pub protocol_version: u16,
+    /// Boards that speak another protocol version.
+    pub mismatched_peers: Vec<MismatchedPeer>,
+}
+
+/// A board that speaks another protocol version than the PC.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings.ts")]
+pub struct MismatchedPeer {
+    /// MAC address as `aa:bb:cc:dd:ee:ff`.
+    pub mac: String,
+    /// Protocol version the board speaks.
+    pub protocol: u16,
+}
+
+impl From<&beambench_protocol::PeerMismatch> for MismatchedPeer {
+    fn from(p: &beambench_protocol::PeerMismatch) -> Self {
+        Self {
+            mac: p.mac.map(|b| format!("{b:02x}")).join(":"),
+            protocol: p.protocol,
+        }
+    }
 }
 
 /// Serial port information returned by the list_ports endpoint.
@@ -117,11 +140,11 @@ pub enum WsEvent {
 pub enum WsCommand {
     /// Start a new antenna pattern sweep with the given configuration.
     StartSweep(SweepConfig),
-    /// Forward TX radio configuration to the TX board via the RX bridge.
+    /// Forward TX radio configuration to the TX board via the bridge.
     ConfigureTx(TxConfig),
     /// Abort the current sweep immediately.
     Stop,
-    /// Request a fresh status snapshot from the RX board.
+    /// Request a fresh status snapshot from the bridge.
     QueryStatus,
     /// List available serial ports (response sent via REST, not WS).
     ListPorts,
@@ -137,7 +160,10 @@ pub enum WsCommand {
     Jog { delta_deg: f32 },
     /// Start an OTA firmware update for the specified target device.
     /// Target is "rx", "tx", "turntable", or "bridge".
-    OtaUpload { target: String, firmware_path: String },
+    OtaUpload {
+        target: String,
+        firmware_path: String,
+    },
     /// Set the motor-to-turntable gear ratio (motor_deg = turntable_deg × ratio).
     SetTransmissionRatio { ratio: f32 },
 }
@@ -162,7 +188,10 @@ impl SweepConfig {
 pub fn export_csv(data: &[DataPoint]) -> String {
     let mut csv = String::from("angle_deg,rssi_dbm,sample_count\n");
     for dp in data {
-        csv.push_str(&format!("{},{},{}\n", dp.angle_deg, dp.rssi_dbm, dp.sample_count));
+        csv.push_str(&format!(
+            "{},{},{}\n",
+            dp.angle_deg, dp.rssi_dbm, dp.sample_count
+        ));
     }
     csv
 }
@@ -202,7 +231,9 @@ mod tests {
 
     // ── JSON round-trip tests ───────────────────────────────────────────
 
-    fn json_round_trip<T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug>(
+    fn json_round_trip<
+        T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+    >(
         val: &T,
     ) {
         let json = serde_json::to_string(val).expect("serialize");
@@ -270,6 +301,11 @@ mod tests {
             backend_name: "espnow".to_string(),
             backend_freq_mhz: Some(2400),
             transmission_ratio: 3.0,
+            protocol_version: 1,
+            mismatched_peers: vec![MismatchedPeer {
+                mac: "01:02:03:04:05:06".to_string(),
+                protocol: 2,
+            }],
         }));
     }
 

@@ -1,109 +1,96 @@
-# Beambench — Open-Source Antenna Pattern Measurement
+# Beambench
 
-Build a desktop antenna-measurement rig out of four ESP32-C3 boards and a motorised turntable. Beambench rotates the antenna under test, measures how strongly a radio signal arrives at each angle, and plots the result live in your browser as a **polar diagram** — so you can actually *see* in which directions an antenna sends or receives best.
+Antenna pattern measurement with four ESP32-C3 boards and a turntable.
+Firmware, backend and protocol are written in Rust; the UI is Svelte.
 
-Hardware, firmware, and the PC app are all open source.
+> **Proof of concept.** Written with [Claude Code](https://claude.com/claude-code), not yet reviewed.
 
-> ⚠️ **Disclaimer — proof of concept**
->
-> This entire project was written with [Claude Code](https://claude.com/claude-code) and has **not yet undergone any proper code review**. It exists purely as a proof of concept for demo purposes. Do not rely on it for anything that matters — expect rough edges, missing validation, and untested corners.
+![Beambench UI: polar plot of a sweep](docs/ui_screenshot.png)
 
-## Screenshot
-
-![Beambench UI — live polar plot of a completed sweep](docs/ui_screenshot.png)
-
-## How it works
-
-The antenna under test sits on a motorised turntable. A **TX** board sends short radio packets; an **RX** board measures the signal strength of those packets. A **Turntable** board rotates the motor through 360° in small steps, and a **Bridge** board hooks the whole thing up to the PC over USB. The browser UI plots the result as it comes in — angle = direction, distance from the centre = signal strength.
+## Architecture
 
 ```
-                       ┌──────────────────────────┐
-                       │     PC — Browser UI      │
-                       └─────────────┬────────────┘
-                                     │ USB-serial
-                       ┌─────────────┴────────────┐
-                       │   ESP32-C3 — Bridge      │
-                       └─────────────┬────────────┘
-                                     │
-                                     │  ESP-NOW (2.4 GHz)
-                                     │
-            ┌────────────────────────┼────────────────────────┐
-            │                        │                        │
-   ┌────────┴─────────┐    ┌─────────┴────────┐    ┌──────────┴────────┐
-   │  ESP32-C3 — TX   │    │  ESP32-C3 — RX   │    │   ESP32-C3 —      │
-   │  on turntable,   │    │  fixed position, │    │   Turntable —     │
-   │  antenna under   │    │  reference ant., │    │   drives the      │
-   │  test, battery   │    │  measures signal │    │   stepper motor   │
-   └──────────────────┘    └──────────────────┘    └───────────────────┘
-            │                        ▲
-            │   radio signal under   │
-            └────── measurement ─────┘
+            PC: Axum backend + browser UI
+                        │ USB-serial (COBS + postcard)
+                  ESP32-C3: Bridge
+                        │ ESP-NOW (postcard)
+       ┌────────────────┼────────────────┐
+  ESP32-C3: TX     ESP32-C3: RX     ESP32-C3: Turntable
+  antenna under    measures RSSI    drives the
+  test, rotates                     stepper motor
 ```
 
-## Repository layout
+The turntable rotates the TX antenna. The RX measures the RSSI of TX beacons at each angle.
 
-```
-software/
-├── protocol/   Shared no_std message types (postcard + serde)
-├── firmware/   Unified ESP32-C3 firmware; role chosen via Cargo feature
-└── pc/         PC app — Axum backend + Svelte frontend with Plotly polar plot
-```
+## Repository
 
-The firmware is **one crate with feature flags** (`role-bridge`, `role-tx`, `role-rx`, `role-turntable`). Every board flashes the same code; only the feature changes.
+| Path | Content |
+|---|---|
+| `software/protocol` | Shared `no_std` message types and routing logic |
+| `software/firmware` | One firmware for all boards; role via Cargo feature |
+| `software/pc` | Axum backend, Svelte frontend, bridge simulator |
 
-### Protocol layers
+## Protocol
 
-- **PC ↔ Bridge:** COBS-framed [postcard](https://docs.rs/postcard) over USB-serial (or TCP for the simulator)
-- **Bridge ↔ TX/RX/Turntable:** postcard-serialised messages over ESP-NOW
+- Every frame starts with `PROTOCOL_VERSION`. Frames of another version are not decoded, only reported.
+- Golden-bytes tests in `protocol/src/golden.rs` pin the wire layout of every message.
+- The bridge simulator runs the same `bridge_logic`, `tx_logic` and `rx_logic` as the firmware.
 
-## Quick start
+## Requirements
 
-Requires Rust nightly and [probe-rs](https://probe.rs/) for flashing.
+- Rust toolchain from `rust-toolchain.toml`, installed automatically by `rustup`
+- [`just`](https://github.com/casey/just), [`pnpm`](https://pnpm.io)
+- [`espflash`](https://github.com/esp-rs/espflash) for flashing, [`probe-rs`](https://probe.rs) for defmt logs
+
+## Usage
+
+Without hardware:
 
 ```sh
-# Try it with no hardware: bridge simulator + dev server
-just sim                       # in one shell
-cd software/pc && just dev     # in another → http://localhost:5173
+cd software/pc
+just sim    # bridge simulator on 127.0.0.1:9876
+just dev    # backend + UI on http://localhost:5173
 ```
 
-For real hardware, flash one role per board:
+Flash a board. This writes its role to flash once:
 
 ```sh
 cd software/firmware
-cargo run --release --no-default-features --features role-bridge
-cargo run --release --no-default-features --features role-tx
-cargo run --release --no-default-features --features role-rx
-cargo run --release --no-default-features --features role-turntable
+just flash-bridge    # or flash-tx, flash-rx, flash-turntable
+just monitor         # defmt logs via probe-rs
 ```
 
-Once the boards are paired, follow-up firmware updates can be pushed wirelessly with `just ota-<role>`.
+Update paired boards over the air (PC app must be running):
+
+```sh
+just ota-tx          # or ota-rx, ota-turntable
+```
+
+## Development
+
+```sh
+just test      # protocol and PC tests
+just clippy    # all crates, all roles, warnings are errors
+just check
+```
+
+CI runs formatting, clippy, tests and the firmware build for all crates, plus lint, type check and build of the frontend.
 
 ## Hardware
 
-Four **ESP32-C3-DevKit-RUST-1** boards plus a stepper-motor driver. Default driver is the **MKS SERVO42D** (step/dir); a UART variant (SERVO42C) is also supported.
-
-**Step/Dir wiring (default):**
+- 4× ESP32-C3-DevKit-RUST-1
+- MKS SERVO42D stepper driver (step/dir), 12–24 V supply
 
 | ESP32-C3 | SERVO42D | Function |
-|----------|----------|----------|
-| 3.3 V    | COM      | Common anode |
-| GPIO4    | STP      | Step pulse |
-| GPIO5    | DIR      | Direction |
-| GPIO6    | EN       | Enable (active low) |
-| GND      | GND      | Ground |
-| —        | V+       | 12–24 V supply |
+|---|---|---|
+| 3.3 V | COM | Common anode |
+| GPIO7 | STP | Step |
+| GPIO8 | DIR | Direction |
+| GPIO6 | EN | Enable, active low |
+| GND | GND | Ground |
 
-Motor: 200 full steps × 16 microsteps = 3200 steps/revolution (≈ 0.1125°/step). The motor-to-turntable gear ratio is configurable in the UI (default 1:3).
-
-## Testing
-
-```sh
-just test                                      # all host-side tests
-cd software/pc && cargo test --features sim    # PC unit + integration suite
-```
-
-The integration suite spins up an in-process **bridge simulator** that generates synthetic cardioid RSSI data — useful for testing the whole pipeline without flashing anything.
+3200 microsteps per revolution. Motor-to-turntable ratio is set in the UI (default 3).
 
 ## License
 
-Released under the [MIT License](LICENSE). © 2026 Systemscape GmbH.
+[MIT](LICENSE). © 2026 Systemscape GmbH.

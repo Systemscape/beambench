@@ -6,7 +6,6 @@
 
 use beambench_protocol::Role;
 use defmt::info;
-use embedded_storage::{ReadStorage, Storage};
 use esp_storage::FlashStorage;
 
 /// Magic bytes to distinguish a provisioned role from erased flash (0xFF).
@@ -23,7 +22,6 @@ const ROLE_RECORD_SIZE: usize = 8; // 4 magic + 1 role + 3 padding
 /// - If a `role-*` cargo feature is active, write that role to flash and return it.
 /// - Otherwise, read the role from flash.
 pub fn resolve_role(storage: &mut FlashStorage<'_>) -> Role {
-
     // Compile-time role from cargo feature (provisioning mode).
     let feature_role = feature_role();
 
@@ -82,7 +80,10 @@ fn write_role(storage: &mut FlashStorage<'_>, role: Role) {
 
     // Erase the sector before writing (flash can only clear bits, not set them).
     if let Err(e) = storage.write(ROLE_OFFSET, &buf) {
-        defmt::error!("Failed to write role to flash: {:?}", defmt::Debug2Format(&e));
+        defmt::error!(
+            "Failed to write role to flash: {:?}",
+            defmt::Debug2Format(&e)
+        );
         return;
     }
     info!("Role written to flash at 0x{:X}", ROLE_OFFSET);
@@ -91,7 +92,10 @@ fn write_role(storage: &mut FlashStorage<'_>, role: Role) {
 fn read_role(storage: &mut FlashStorage<'_>) -> Option<Role> {
     let mut buf = [0u8; ROLE_RECORD_SIZE];
     if let Err(e) = storage.read(ROLE_OFFSET, &mut buf) {
-        defmt::error!("Failed to read role from flash: {:?}", defmt::Debug2Format(&e));
+        defmt::error!(
+            "Failed to read role from flash: {:?}",
+            defmt::Debug2Format(&e)
+        );
         return None;
     }
 

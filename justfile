@@ -22,3 +22,9 @@ check:
     just software/protocol/check
     just software/firmware/check
     just software/pc/check
+
+# Lint all crates with clippy
+clippy:
+    just software/protocol/clippy
+    just software/firmware/clippy
+    just software/pc/clippy

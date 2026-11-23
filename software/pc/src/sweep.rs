@@ -234,9 +234,8 @@ mod tests {
         let resp_rx = shared_rx(resp_rx);
 
         let config = test_config();
-        let handle = tokio::spawn(async move {
-            run_sweep(config, 1.0, &serial_tx, &resp_rx, &ws_tx).await
-        });
+        let handle =
+            tokio::spawn(async move { run_sweep(config, 1.0, &serial_tx, &resp_rx, &ws_tx).await });
 
         // Respond to commands from the sweep orchestrator.
         tokio::spawn(async move {
@@ -298,9 +297,8 @@ mod tests {
         let resp_rx = shared_rx(resp_rx);
 
         let config = test_config();
-        let handle = tokio::spawn(async move {
-            run_sweep(config, 1.0, &serial_tx, &resp_rx, &ws_tx).await
-        });
+        let handle =
+            tokio::spawn(async move { run_sweep(config, 1.0, &serial_tx, &resp_rx, &ws_tx).await });
 
         tokio::spawn(async move {
             while let Some(cmd) = serial_cmd_rx.recv().await {
@@ -343,9 +341,8 @@ mod tests {
         let resp_rx = shared_rx(resp_rx);
 
         let config = test_config();
-        let handle = tokio::spawn(async move {
-            run_sweep(config, 1.0, &serial_tx, &resp_rx, &ws_tx).await
-        });
+        let handle =
+            tokio::spawn(async move { run_sweep(config, 1.0, &serial_tx, &resp_rx, &ws_tx).await });
 
         // Drop the sender to simulate disconnection.
         drop(resp_tx);
@@ -366,9 +363,8 @@ mod tests {
 
         tokio::time::pause();
 
-        let handle = tokio::spawn(async move {
-            run_sweep(config, 1.0, &serial_tx, &resp_rx, &ws_tx).await
-        });
+        let handle =
+            tokio::spawn(async move { run_sweep(config, 1.0, &serial_tx, &resp_rx, &ws_tx).await });
 
         // Advance past TX ack timeout + move timeout.
         tokio::time::advance(Duration::from_secs(2) + MOVE_TIMEOUT + Duration::from_secs(1)).await;

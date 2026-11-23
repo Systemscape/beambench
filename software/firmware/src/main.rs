@@ -23,26 +23,31 @@ use embassy_sync::{blocking_mutex::raw::NoopRawMutex, mutex::Mutex, signal::Sign
 use esp_alloc as _;
 use esp_backtrace as _;
 use esp_hal::{
+    Async,
     clock::CpuClock,
-    interrupt::software::SoftwareInterruptControl,
     rmt::Rmt,
     time::Rate,
     timer::timg::TimerGroup,
-    usb_serial_jtag::{UsbSerialJtag, UsbSerialJtagRx, UsbSerialJtagTx},
-    Async,
+    usb::usb_serial_jtag::{UsbSerialJtag, UsbSerialJtagRx, UsbSerialJtagTx},
 };
-use esp_hal_smartled::{buffer_size, color_order, RmtSmartLeds, Sk68xxTiming};
+use esp_hal_smartled::{RmtSmartLeds, SK68XX_TIMING, buffer_size, color_order};
 use esp_radio::esp_now::{EspNowManager, EspNowSender};
-use smart_leds::{SmartLedsWrite, RGB8};
+use smart_leds::{RGB8, SmartLedsWrite};
 
 use beambench_protocol::Role;
 use common::*;
 
-type Led = RmtSmartLeds<'static, { buffer_size::<RGB8>(1) }, esp_hal::Blocking, RGB8, color_order::Grb, Sk68xxTiming>;
+/// RMT clock for the LED driver.
+const RMT_FREQ: Rate = Rate::from_mhz(80);
+
+type Led =
+    RmtSmartLeds<'static, { buffer_size::<RGB8>(1) }, esp_hal::Blocking, RGB8, color_order::Grb>;
 
 #[defmt::panic_handler]
 fn defmt_panic() -> ! {
-    loop {}
+    loop {
+        core::hint::spin_loop();
+    }
 }
 
 defmt::timestamp!("");
@@ -71,23 +76,15 @@ async fn main(spawner: Spawner) -> ! {
 
     // ── RTOS + Embassy setup ─────────────────────────────────────────────────
 
-    let sw_int = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     let timg0 = TimerGroup::new(peripherals.TIMG0);
-    esp_rtos::start(timg0.timer0, sw_int.software_interrupt0);
+    esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
     // ── ESP-NOW setup ────────────────────────────────────────────────────────
 
-    let esp_radio_ctrl =
-        &*mk_static!(esp_radio::Controller<'static>, esp_radio::init().unwrap());
-
-    let (mut wifi_controller, interfaces) =
-        esp_radio::wifi::new(esp_radio_ctrl, peripherals.WIFI, Default::default()).unwrap();
-    wifi_controller
-        .set_mode(esp_radio::wifi::WifiMode::Sta)
-        .unwrap();
-    wifi_controller.start().unwrap();
-
-    let esp_now = interfaces.esp_now;
+    // Default config is station mode. ESP-NOW keeps Wi-Fi alive on its own.
+    let wifi_controller =
+        esp_radio::wifi::WifiController::new(peripherals.WIFI, Default::default()).unwrap();
+    let esp_now = wifi_controller.esp_now();
     esp_now.set_channel(DEFAULT_CHANNEL).unwrap();
     info!(
         "ESP-NOW v{} on channel {}",
@@ -100,27 +97,28 @@ async fn main(spawner: Spawner) -> ! {
 
     // ── LED setup (SK6812 on GPIO2 via RMT) ──────────────────────────────────
 
-    let rmt = Rmt::new(peripherals.RMT, Rate::from_mhz(80)).unwrap();
-    let mut led =
-        RmtSmartLeds::<{ buffer_size::<RGB8>(1) }, _, RGB8, color_order::Grb, Sk68xxTiming>::new(
-            rmt.channel0,
-            peripherals.GPIO2,
-        )
-        .unwrap();
+    let rmt = Rmt::new(peripherals.RMT, RMT_FREQ).unwrap();
+    let mut led = RmtSmartLeds::<{ buffer_size::<RGB8>(1) }, _, RGB8, color_order::Grb>::new(
+        SK68XX_TIMING,
+        rmt.channel0,
+        peripherals.GPIO2,
+        RMT_FREQ,
+    )
+    .unwrap();
 
     let _ = led.write(core::iter::once(COLOR_BLUE));
 
     let led_signal = mk_static!(Signal<NoopRawMutex, LedState>, Signal::new());
 
     let led = mk_static!(Led, led);
-    spawner.spawn(led_task(led, led_signal)).ok();
+    spawner.spawn(led_task(led, led_signal).unwrap());
 
     // ── ESP-NOW split ────────────────────────────────────────────────────────
 
     let (manager, sender, receiver) = esp_now.split();
-    let manager = mk_static!(EspNowManager<'static>, manager);
+    let manager = mk_static!(EspNowManager, manager);
     let sender = mk_static!(
-        Mutex::<NoopRawMutex, EspNowSender<'static>>,
+        Mutex::<NoopRawMutex, EspNowSender>,
         Mutex::<NoopRawMutex, _>::new(sender)
     );
 
@@ -132,7 +130,10 @@ async fn main(spawner: Spawner) -> ! {
             let (usb_rx, usb_tx) = usb_serial.split();
             let usb_rx = mk_static!(UsbSerialJtagRx<'static, Async>, usb_rx);
             let usb_tx = mk_static!(UsbSerialJtagTx<'static, Async>, usb_tx);
-            bridge::run(spawner, manager, sender, receiver, led_signal, usb_rx, usb_tx).await;
+            bridge::run(
+                spawner, manager, sender, receiver, led_signal, usb_rx, usb_tx,
+            )
+            .await;
         }
         Role::Rx => {
             #[cfg(not(feature = "backend-uart"))]
@@ -141,14 +142,12 @@ async fn main(spawner: Spawner) -> ! {
             }
             #[cfg(feature = "backend-uart")]
             {
-                let uart = esp_hal::uart::Uart::new(
-                    peripherals.UART1,
-                    esp_hal::uart::Config::default(),
-                )
-                .unwrap()
-                .with_rx(peripherals.GPIO5)
-                .with_tx(peripherals.GPIO4)
-                .into_async();
+                let uart =
+                    esp_hal::uart::Uart::new(peripherals.UART1, esp_hal::uart::Config::default())
+                        .unwrap()
+                        .with_rx(peripherals.GPIO5)
+                        .with_tx(peripherals.GPIO4)
+                        .into_async();
                 rx::run(spawner, manager, sender, receiver, led_signal, flash, uart).await;
             }
         }
@@ -159,14 +158,12 @@ async fn main(spawner: Spawner) -> ! {
             }
             #[cfg(feature = "backend-uart")]
             {
-                let uart = esp_hal::uart::Uart::new(
-                    peripherals.UART1,
-                    esp_hal::uart::Config::default(),
-                )
-                .unwrap()
-                .with_rx(peripherals.GPIO5)
-                .with_tx(peripherals.GPIO4)
-                .into_async();
+                let uart =
+                    esp_hal::uart::Uart::new(peripherals.UART1, esp_hal::uart::Config::default())
+                        .unwrap()
+                        .with_rx(peripherals.GPIO5)
+                        .with_tx(peripherals.GPIO4)
+                        .into_async();
                 tx::run(spawner, manager, sender, receiver, led_signal, flash, uart).await;
             }
         }
@@ -209,9 +206,14 @@ async fn main(spawner: Spawner) -> ! {
 }
 
 #[embassy_executor::task]
-async fn led_task(
-    led: &'static mut Led,
-    led_signal: &'static Signal<NoopRawMutex, LedState>,
-) {
-    run_led_loop(led, led_signal, LedState::Blink { color: COLOR_BLUE, period_ms: 500 }).await;
+async fn led_task(led: &'static mut Led, led_signal: &'static Signal<NoopRawMutex, LedState>) {
+    run_led_loop(
+        led,
+        led_signal,
+        LedState::Blink {
+            color: COLOR_BLUE,
+            period_ms: 500,
+        },
+    )
+    .await;
 }

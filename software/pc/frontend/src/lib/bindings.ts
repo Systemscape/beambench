@@ -18,6 +18,19 @@ rssi_dbm: number,
 sample_count: number, };
 
 /**
+ * A board that speaks another protocol version than the PC.
+ */
+export type MismatchedPeer = { 
+/**
+ * MAC address as `aa:bb:cc:dd:ee:ff`.
+ */
+mac: string, 
+/**
+ * Protocol version the board speaks.
+ */
+protocol: number, };
+
+/**
  * Serial port information returned by the list_ports endpoint.
  */
 export type PortInfo = { 
@@ -74,7 +87,15 @@ backend_freq_mhz: number | null,
 /**
  * Motor-to-turntable gear ratio (motor_deg = turntable_deg × ratio).
  */
-transmission_ratio: number, };
+transmission_ratio: number, 
+/**
+ * Protocol version of this PC app.
+ */
+protocol_version: number, 
+/**
+ * Boards that speak another protocol version.
+ */
+mismatched_peers: Array<MismatchedPeer>, };
 
 /**
  * TX configuration.

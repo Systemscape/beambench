@@ -2,10 +2,74 @@
 //!
 //! Speaks postcard+COBS using PcCommand/DeviceEvent, generates synthetic
 //! antenna patterns so you can test the full PC pipeline without hardware.
+//!
+//! Routing, response translation and the TX/RX state machines are the same
+//! code the firmware runs (`bridge_logic`, `tx_logic`, `rx_logic`). Only the
+//! radio link, the motor and the RSSI values are simulated.
 
-use beambench_protocol::{DeviceEvent, PcCommand, MAX_MSG_SIZE};
+use beambench_protocol::bridge_logic::{self, RouteAction};
+use beambench_protocol::rx_logic::MeasurementState;
+use beambench_protocol::tx_logic::TxState;
+use beambench_protocol::{
+    BackendInfo, DeviceEvent, EspnowMessage, MAX_MSG_SIZE, PcCommand, Role, TurntableCommand,
+    TurntableResponse,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
+
+/// Beacons the simulated RX receives per measurement window.
+const BEACONS_PER_MEASUREMENT: u16 = 10;
+
+/// Simulated field devices behind the bridge.
+struct FieldDevices {
+    tx: TxState,
+    rx: MeasurementState,
+    angle_deg: f32,
+}
+
+impl FieldDevices {
+    fn new() -> Self {
+        Self {
+            tx: TxState::new(),
+            rx: MeasurementState::new(),
+            angle_deg: 0.0,
+        }
+    }
+
+    /// Deliver a message to the device with the given role, as the bridge
+    /// does over ESP-NOW. Returns the device's response, if any.
+    async fn deliver(&mut self, role: Role, msg: &EspnowMessage) -> Option<EspnowMessage> {
+        match role {
+            Role::Tx => self.tx.handle_message(msg),
+            Role::Rx => {
+                let resp = self.rx.handle_message(msg, 0);
+                // The RX only hears beacons while the TX is transmitting.
+                if matches!(msg, EspnowMessage::StartMeasurement) && self.tx.transmitting {
+                    let rssi = synthetic_rssi(self.angle_deg);
+                    for _ in 0..BEACONS_PER_MEASUREMENT {
+                        self.rx
+                            .handle_message(&EspnowMessage::MeasurementBeacon, rssi);
+                    }
+                }
+                resp
+            }
+            Role::Turntable => match msg {
+                EspnowMessage::TurntableCmd(TurntableCommand::MoveTo { angle_deg }) => {
+                    self.angle_deg = *angle_deg;
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    Some(EspnowMessage::TurntableResp(
+                        TurntableResponse::MoveComplete {
+                            angle_deg: *angle_deg,
+                        },
+                    ))
+                }
+                // Like the firmware: Stop halts the motor without a response.
+                _ => None,
+            },
+            Role::Bridge => None,
+        }
+    }
+}
 
 /// Handle a single client connection: decode commands, respond with events.
 pub async fn handle_connection(stream: tokio::net::TcpStream) {
@@ -16,101 +80,42 @@ pub async fn handle_connection(stream: tokio::net::TcpStream) {
     tokio::spawn(cobs_reader(reader, cmd_tx));
     tokio::spawn(cobs_writer(writer, resp_rx));
 
-    let mut transmitting = false;
-    let mut rssi_sum: f32 = 0.0;
-    let mut rssi_count: u16 = 0;
-    let mut current_angle: f32 = 0.0;
+    let mut devices = FieldDevices::new();
 
-    loop {
-        let cmd = match cmd_rx.recv().await {
-            Some(cmd) => cmd,
-            None => return,
+    while let Some(cmd) = cmd_rx.recv().await {
+        let event = match bridge_logic::route_command(&cmd) {
+            // OTA is not simulated: no device answers those messages.
+            RouteAction::SendTo { role, msg } => devices
+                .deliver(role, &msg)
+                .await
+                .and_then(|resp| bridge_logic::translate_response(&resp)),
+            RouteAction::Local => Some(DeviceEvent::Status {
+                tx_connected: true,
+                rx_connected: true,
+                turntable_connected: true,
+                backend: BackendInfo {
+                    name: heapless::String::try_from("sim").unwrap(),
+                    frequency_mhz: Some(2400),
+                },
+                mismatched_peers: heapless::Vec::new(),
+            }),
         };
 
-        match cmd {
-            PcCommand::ConfigureTx { .. } => {
-                let _ = resp_tx.send(DeviceEvent::TxAck).await;
-            }
-            PcCommand::StartTransmitting => {
-                transmitting = true;
-                let _ = resp_tx.send(DeviceEvent::TxAck).await;
-            }
-            PcCommand::StopTransmitting => {
-                transmitting = false;
-                let _ = resp_tx.send(DeviceEvent::TxAck).await;
-            }
-            PcCommand::MoveTo { angle_deg } => {
-                // Simulate instant move.
-                current_angle = angle_deg;
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                let _ = resp_tx
-                    .send(DeviceEvent::MoveComplete { angle_deg })
-                    .await;
-            }
-            PcCommand::StopTurntable => {
-                let _ = resp_tx
-                    .send(DeviceEvent::MoveComplete {
-                        angle_deg: current_angle,
-                    })
-                    .await;
-            }
-            PcCommand::ReturnHome => {
-                current_angle = 0.0;
-                let _ = resp_tx.send(DeviceEvent::HomeComplete).await;
-            }
-            PcCommand::StartMeasurement => {
-                rssi_sum = 0.0;
-                rssi_count = 0;
-
-                // Simulate beacon reception: generate synthetic RSSI samples.
-                if transmitting {
-                    let rssi = synthetic_rssi(current_angle);
-                    let n = 10u16;
-                    rssi_sum = rssi * n as f32;
-                    rssi_count = n;
-                }
-            }
-            PcCommand::ReportMeasurement => {
-                let (rssi_dbm, sample_count) = if rssi_count > 0 {
-                    (rssi_sum / rssi_count as f32, rssi_count)
-                } else {
-                    (-100.0, 0)
-                };
-                let _ = resp_tx
-                    .send(DeviceEvent::Measurement {
-                        rssi_dbm,
-                        sample_count,
-                    })
-                    .await;
-            }
-            PcCommand::QueryStatus => {
-                let _ = resp_tx
-                    .send(DeviceEvent::Status {
-                        tx_connected: true,
-                        rx_connected: true,
-                        turntable_connected: true,
-                        backend: beambench_protocol::BackendInfo {
-                            name: heapless::String::try_from("sim").unwrap(),
-                            frequency_mhz: Some(2400),
-                        },
-                    })
-                    .await;
-            }
-            // OTA not implemented in simulator.
-            PcCommand::OtaBegin { .. } | PcCommand::OtaData { .. } | PcCommand::OtaFinish { .. } => {}
+        if let Some(event) = event {
+            let _ = resp_tx.send(event).await;
         }
     }
 }
 
-/// Synthetic RSSI: cardioid-like pattern peaked at 45°.
-fn synthetic_rssi(angle_deg: f32) -> f32 {
+/// Synthetic RSSI in whole dBm: cardioid-like pattern peaked at 45°.
+fn synthetic_rssi(angle_deg: f32) -> i32 {
     let rad = (angle_deg - 45.0_f32).to_radians();
-    -30.0 + 20.0 * rad.cos()
+    (-30.0 + 20.0 * rad.cos()).round() as i32
 }
 
 /// Compute the expected synthetic RSSI for a given angle (matches synthetic_rssi).
 pub fn expected_rssi(angle_deg: f32) -> f32 {
-    synthetic_rssi(angle_deg)
+    synthetic_rssi(angle_deg) as f32
 }
 
 /// Decode COBS-framed postcard messages from a reader into a channel.
@@ -125,15 +130,12 @@ pub async fn cobs_reader(mut reader: impl AsyncReadExt + Unpin, tx: mpsc::Sender
                 accum.extend_from_slice(&raw_buf[..n]);
                 while let Some(zero_pos) = accum.iter().position(|&b| b == 0) {
                     let frame = &accum[..zero_pos + 1];
-                    if frame.len() > 1 {
-                        match postcard::from_bytes_cobs::<PcCommand>(&mut frame.to_vec()) {
-                            Ok(msg) => {
-                                if tx.send(msg).await.is_err() {
-                                    return;
-                                }
-                            }
-                            Err(_) => {}
-                        }
+                    if frame.len() > 1
+                        && let Ok(msg) =
+                            beambench_protocol::deserialize_cobs::<PcCommand>(&mut frame.to_vec())
+                        && tx.send(msg).await.is_err()
+                    {
+                        return;
                     }
                     accum = accum[zero_pos + 1..].to_vec();
                 }
@@ -151,13 +153,10 @@ pub async fn cobs_writer(
     let mut buf = [0u8; MAX_MSG_SIZE];
 
     while let Some(msg) = rx.recv().await {
-        match beambench_protocol::serialize_cobs(&msg, &mut buf) {
-            Ok(len) => {
-                if writer.write_all(&buf[..len]).await.is_err() {
-                    return;
-                }
-            }
-            Err(_) => {}
+        if let Ok(len) = beambench_protocol::serialize_cobs(&msg, &mut buf)
+            && writer.write_all(&buf[..len]).await.is_err()
+        {
+            return;
         }
     }
 }

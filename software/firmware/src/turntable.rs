@@ -1,5 +1,10 @@
 //! Turntable role — motor controller receiving commands via ESPNOW.
 
+#![expect(
+    clippy::too_many_arguments,
+    reason = "embassy tasks receive their static resources as arguments"
+)]
+
 use defmt::info;
 use embassy_executor::Spawner;
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, mutex::Mutex, signal::Signal};
@@ -34,9 +39,9 @@ enum MotorResult {
 pub async fn run(
     spawner: Spawner,
     motor: &'static Mutex<NoopRawMutex, StepDirMotor<'static>>,
-    manager: &'static EspNowManager<'static>,
-    sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
-    receiver: EspNowReceiver<'static>,
+    manager: &'static EspNowManager,
+    sender: &'static Mutex<NoopRawMutex, EspNowSender>,
+    receiver: EspNowReceiver,
     led_signal: &'static Signal<NoopRawMutex, LedState>,
     flash: &'static SharedFlash,
 ) -> ! {
@@ -49,17 +54,12 @@ pub async fn run(
         Mutex::new(crate::ota_responder::OtaState::new())
     );
 
-    spawner
-        .spawn(turntable_discovery_task(
-            sender,
-            bridge_mac,
-            last_bridge_seen,
-            manager,
-            led_signal,
-        ))
-        .ok();
-    spawner
-        .spawn(turntable_listener_task(
+    spawner.spawn(
+        turntable_discovery_task(sender, bridge_mac, last_bridge_seen, manager, led_signal)
+            .unwrap(),
+    );
+    spawner.spawn(
+        turntable_listener_task(
             manager,
             sender,
             receiver,
@@ -69,19 +69,11 @@ pub async fn run(
             flash,
             ota,
             led_signal,
-        ))
-        .ok();
-    spawner
-        .spawn(turntable_responder_task(sender, bridge_mac, motor_result))
-        .ok();
-    spawner
-        .spawn(motor_task_step_dir(
-            motor,
-            motor_cmd,
-            motor_result,
-            led_signal,
-        ))
-        .ok();
+        )
+        .unwrap(),
+    );
+    spawner.spawn(turntable_responder_task(sender, bridge_mac, motor_result).unwrap());
+    spawner.spawn(motor_task_step_dir(motor, motor_cmd, motor_result, led_signal).unwrap());
 
     info!("Turntable controller ready, discovering Bridge...");
 
@@ -92,24 +84,21 @@ pub async fn run(
 
 #[embassy_executor::task]
 async fn turntable_discovery_task(
-    sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
+    sender: &'static Mutex<NoopRawMutex, EspNowSender>,
     bridge_mac: &'static Mutex<NoopRawMutex, Option<[u8; 6]>>,
     last_bridge_seen: &'static Mutex<NoopRawMutex, Option<Instant>>,
-    manager: &'static EspNowManager<'static>,
+    manager: &'static EspNowManager,
     led_signal: &'static Signal<NoopRawMutex, LedState>,
 ) {
     let mut buf = [0u8; proto::MAX_MSG_SIZE];
+    let mut last_hello = None;
+    let mut led_paired = None;
 
     loop {
-        let paired = bridge_mac.lock().await.is_some();
-        if paired {
-            Timer::after(Duration::from_secs(10)).await;
-        } else {
-            Timer::after(BEACON_INTERVAL).await;
-        }
+        Timer::after(BEACON_INTERVAL).await;
 
         // Check for stale bridge and unpair.
-        {
+        let paired = {
             let mut mac = bridge_mac.lock().await;
             let last = *last_bridge_seen.lock().await;
             if mac.is_some() && is_heartbeat_stale(last) {
@@ -118,8 +107,17 @@ async fn turntable_discovery_task(
                 *mac = None;
                 *last_bridge_seen.lock().await = None;
             }
-            signal_pairing_led(led_signal, mac.is_some());
+            mac.is_some()
+        };
+        if led_paired != Some(paired) {
+            signal_pairing_led(led_signal, paired);
+            led_paired = Some(paired);
         }
+
+        if !hello_due(paired, last_hello) {
+            continue;
+        }
+        last_hello = Some(Instant::now());
 
         let beacon = EspnowMessage::Hello(proto::HelloBeacon {
             role: Role::Turntable,
@@ -135,9 +133,9 @@ async fn turntable_discovery_task(
 
 #[embassy_executor::task]
 async fn turntable_listener_task(
-    manager: &'static EspNowManager<'static>,
-    sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
-    mut receiver: EspNowReceiver<'static>,
+    manager: &'static EspNowManager,
+    sender: &'static Mutex<NoopRawMutex, EspNowSender>,
+    mut receiver: EspNowReceiver,
     bridge_mac: &'static Mutex<NoopRawMutex, Option<[u8; 6]>>,
     last_bridge_seen: &'static Mutex<NoopRawMutex, Option<Instant>>,
     motor_cmd: &'static Signal<NoopRawMutex, MotorCmd>,
@@ -173,7 +171,7 @@ async fn turntable_listener_task(
             Ok(EspnowMessage::TurntableCmd(cmd)) => {
                 let is_bridge = {
                     let mac = bridge_mac.lock().await;
-                    mac.map_or(false, |m| m == src)
+                    mac.is_some_and(|m| m == src)
                 };
                 if is_bridge {
                     *last_bridge_seen.lock().await = Some(Instant::now());
@@ -197,6 +195,13 @@ async fn turntable_listener_task(
                     .await;
                 }
             }
+            Err(proto::DecodeError::VersionMismatch { protocol }) => {
+                info!(
+                    "Dropped frame with protocol v{}, expected v{}",
+                    protocol,
+                    proto::PROTOCOL_VERSION
+                );
+            }
             _ => {}
         }
     }
@@ -204,7 +209,7 @@ async fn turntable_listener_task(
 
 #[embassy_executor::task]
 async fn turntable_responder_task(
-    sender: &'static Mutex<NoopRawMutex, EspNowSender<'static>>,
+    sender: &'static Mutex<NoopRawMutex, EspNowSender>,
     bridge_mac: &'static Mutex<NoopRawMutex, Option<[u8; 6]>>,
     result_signal: &'static Signal<NoopRawMutex, MotorResult>,
 ) {

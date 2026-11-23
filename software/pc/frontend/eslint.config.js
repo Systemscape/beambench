@@ -43,6 +43,11 @@ export default ts.config(
         }
     },
     {
-        ignores: ['.svelte-kit/**', 'build/**', 'node_modules/**', 'src/lib/bindings.ts']
+        ignores: [
+            '.svelte-kit/**',
+            'build/**',
+            'node_modules/**',
+            'src/lib/bindings.ts'
+        ]
     }
 );

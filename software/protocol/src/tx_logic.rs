@@ -20,16 +20,19 @@ impl TxState {
         }
     }
 
+    /// Set the transmission rate. A rate of 0 Hz is ignored.
+    pub fn set_packet_rate(&mut self, packet_rate_hz: u16) {
+        if packet_rate_hz > 0 {
+            self.tx_interval_ms = 1000 / packet_rate_hz as u64;
+        }
+    }
+
     /// Process an incoming ESP-NOW message. Returns a response if applicable.
     pub fn handle_message(&mut self, msg: &EspnowMessage) -> Option<EspnowMessage> {
         match msg {
             EspnowMessage::TxCmd(cmd) => match cmd {
-                TxCommand::Configure {
-                    packet_rate_hz, ..
-                } => {
-                    if *packet_rate_hz > 0 {
-                        self.tx_interval_ms = 1000 / *packet_rate_hz as u64;
-                    }
+                TxCommand::Configure { packet_rate_hz, .. } => {
+                    self.set_packet_rate(*packet_rate_hz);
                     Some(EspnowMessage::TxResp(TxResponse::Ack))
                 }
                 TxCommand::StartTransmit => {

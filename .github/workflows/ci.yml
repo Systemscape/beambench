@@ -5,18 +5,79 @@ on:
     branches: [main]
   pull_request:
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  ts-bindings:
-    name: TypeScript bindings up to date
+  protocol:
+    name: Protocol
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: software/protocol
+    steps:
+      - uses: actions/checkout@v4
+      # Installs the toolchain pinned in rust-toolchain.toml.
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: software/protocol
+      - uses: taiki-e/install-action@just
+      - run: cargo fmt --check
+      - run: just clippy
+      - run: just test
+
+  firmware:
+    name: Firmware
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: software/firmware
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: software/firmware
+      - uses: taiki-e/install-action@just
+      - run: cargo fmt --check
+      # Covers all roles and backends.
+      - run: just clippy
+      - run: just build
+
+  pc:
+    name: PC app
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: software/pc
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.18.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: pnpm
+          cache-dependency-path: software/pc/frontend/pnpm-lock.yaml
+      - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: software/pc
       - uses: taiki-e/install-action@just
+
+      - name: Frontend
+        working-directory: software/pc/frontend
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run format:check
+          pnpm run lint
+          pnpm run check
+          pnpm run build
+
+      # The backend embeds frontend/build, so it runs after the frontend build.
+      - run: cargo fmt --check
+      - run: just clippy
+      - run: just test-all
       - run: just check-types
