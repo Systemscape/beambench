@@ -204,6 +204,20 @@ async fn tx_listener_task(
                         led_signal.signal(LedState::Solid(COLOR_GREEN));
                     }
                 }
+
+                // Acknowledge every command, like `tx_logic::TxState::handle_message`.
+                let (paired, bridge_mac) = {
+                    let s = state.lock().await;
+                    (s.bridge_paired, s.bridge_mac)
+                };
+                if paired {
+                    let ack = EspnowMessage::TxResp(proto::TxResponse::Ack);
+                    let mut buf = [0u8; proto::MAX_MSG_SIZE];
+                    if let Ok(data) = proto::serialize(&ack, &mut buf) {
+                        let mut s = sender.lock().await;
+                        let _ = s.send_async(&bridge_mac, data).await;
+                    }
+                }
             }
             Ok(ref espnow_msg) if crate::ota_responder::is_ota_message(espnow_msg) => {
                 let bridge_mac = state.lock().await.bridge_mac;
