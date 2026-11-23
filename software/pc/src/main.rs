@@ -18,7 +18,8 @@ use tokio::sync::{Mutex, broadcast, watch};
 use tracing::info;
 
 use beambench_pc::{
-    DEFAULT_TRANSMISSION_RATIO, PortInfo, SystemStatus, WsCommand, WsEvent, export_csv,
+    DEFAULT_TRANSMISSION_RATIO, MismatchedPeer, PortInfo, SystemStatus, WsCommand, WsEvent,
+    export_csv,
 };
 
 /// Initial delay before sending QueryStatus to a freshly-opened device.
@@ -114,6 +115,17 @@ impl AppState {
             backend_name: self.backend_name.lock().await.clone(),
             backend_freq_mhz: *self.backend_freq_mhz.lock().await,
             transmission_ratio: self.transmission_ratio(),
+            protocol_version: beambench_protocol::PROTOCOL_VERSION,
+            mismatched_peers: if serial_connected {
+                self.mismatched_peers
+                    .lock()
+                    .await
+                    .iter()
+                    .map(MismatchedPeer::from)
+                    .collect()
+            } else {
+                Vec::new()
+            },
         }
     }
 
@@ -907,10 +919,10 @@ async fn update_mismatched_peers(state: &AppState, peers: &[beambench_protocol::
         return;
     }
     *known = peers.to_vec();
-    for p in peers {
-        let mac = p.mac.map(|b| format!("{b:02x}")).join(":");
+    for p in peers.iter().map(MismatchedPeer::from) {
         let msg = format!(
-            "Board {mac} speaks protocol v{}, PC v{}. Reflash it.",
+            "Board {} speaks protocol v{}, PC v{}. Reflash it.",
+            p.mac,
             p.protocol,
             beambench_protocol::PROTOCOL_VERSION
         );

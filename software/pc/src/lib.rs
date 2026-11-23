@@ -73,6 +73,29 @@ pub struct SystemStatus {
     pub backend_freq_mhz: Option<u16>,
     /// Motor-to-turntable gear ratio (motor_deg = turntable_deg × ratio).
     pub transmission_ratio: f32,
+    /// Protocol version of this PC app.
+    pub protocol_version: u16,
+    /// Boards that speak another protocol version.
+    pub mismatched_peers: Vec<MismatchedPeer>,
+}
+
+/// A board that speaks another protocol version than the PC.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings.ts")]
+pub struct MismatchedPeer {
+    /// MAC address as `aa:bb:cc:dd:ee:ff`.
+    pub mac: String,
+    /// Protocol version the board speaks.
+    pub protocol: u16,
+}
+
+impl From<&beambench_protocol::PeerMismatch> for MismatchedPeer {
+    fn from(p: &beambench_protocol::PeerMismatch) -> Self {
+        Self {
+            mac: p.mac.map(|b| format!("{b:02x}")).join(":"),
+            protocol: p.protocol,
+        }
+    }
 }
 
 /// Serial port information returned by the list_ports endpoint.
@@ -278,6 +301,11 @@ mod tests {
             backend_name: "espnow".to_string(),
             backend_freq_mhz: Some(2400),
             transmission_ratio: 3.0,
+            protocol_version: 1,
+            mismatched_peers: vec![MismatchedPeer {
+                mac: "01:02:03:04:05:06".to_string(),
+                protocol: 2,
+            }],
         }));
     }
 

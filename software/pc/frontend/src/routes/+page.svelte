@@ -37,7 +37,9 @@
         data_points: 0,
         backend_name: '',
         backend_freq_mhz: null,
-        transmission_ratio: 3
+        transmission_ratio: 3,
+        protocol_version: 0,
+        mismatched_peers: []
     });
 
     /** Transmission ratio shown in the input. Synced from server Status events. */
@@ -172,7 +174,9 @@
                     data_points: event.data_points,
                     backend_name: event.backend_name,
                     backend_freq_mhz: event.backend_freq_mhz,
-                    transmission_ratio: event.transmission_ratio
+                    transmission_ratio: event.transmission_ratio,
+                    protocol_version: event.protocol_version,
+                    mismatched_peers: event.mismatched_peers
                 };
                 transmissionRatioInput = event.transmission_ratio;
                 if (!event.sweeping) stopping = false;
@@ -521,6 +525,19 @@
                         class:active={status.turntable_connected}
                         >Turntable</span>
                 </div>
+                {#if status.mismatched_peers.length > 0}
+                    <div class="mismatch" role="alert">
+                        <strong>Protocol mismatch</strong> (PC v{status.protocol_version}).
+                        Reflash:
+                        <ul>
+                            {#each status.mismatched_peers as peer (peer.mac)}
+                                <li>
+                                    <code>{peer.mac}</code> speaks v{peer.protocol}
+                                </li>
+                            {/each}
+                        </ul>
+                    </div>
+                {/if}
                 {#if status.backend_name}
                     <p class="backend-info">
                         Backend: <strong>{status.backend_name}</strong
@@ -986,6 +1003,20 @@
         background: var(--bg);
         border-color: var(--success);
         color: var(--success);
+    }
+
+    .mismatch {
+        font-size: 0.75rem;
+        color: var(--danger);
+        border: 1.5px solid var(--danger);
+        border-radius: 3px;
+        padding: 0.4rem 0.5rem;
+        margin-top: 0.5rem;
+    }
+
+    .mismatch ul {
+        margin: 0.25rem 0 0;
+        padding-left: 1.2rem;
     }
 
     .backend-info {
