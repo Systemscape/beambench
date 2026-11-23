@@ -83,6 +83,16 @@ pub type SharedFlash = embassy_sync::mutex::Mutex<NoopRawMutex, esp_storage::Fla
 pub const DEFAULT_CHANNEL: u8 = 11;
 pub const BEACON_INTERVAL: Duration = Duration::from_secs(1);
 pub const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(15);
+/// Interval between `Hello` beacons while paired.
+pub const PAIRED_HELLO_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Whether a paired device should send its next `Hello`.
+pub fn hello_due(paired: bool, last_hello: Option<embassy_time::Instant>) -> bool {
+    match last_hello {
+        Some(t) if paired => embassy_time::Instant::now() - t >= PAIRED_HELLO_INTERVAL,
+        _ => true,
+    }
+}
 
 // ── Shared helpers ──────────────────────────────────────────────────────────
 

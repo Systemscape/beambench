@@ -112,17 +112,14 @@ async fn tx_discovery_task(
     led_signal: &'static Signal<NoopRawMutex, LedState>,
 ) {
     let mut buf = [0u8; proto::MAX_MSG_SIZE];
+    let mut last_hello = None;
+    let mut led_paired = None;
 
     loop {
-        let paired = state.lock().await.bridge_paired;
-        if paired {
-            Timer::after(Duration::from_secs(10)).await;
-        } else {
-            Timer::after(BEACON_INTERVAL).await;
-        }
+        Timer::after(BEACON_INTERVAL).await;
 
         // Check for stale bridge and unpair.
-        {
+        let paired = {
             let mut s = state.lock().await;
             if s.bridge_paired && is_heartbeat_stale(s.last_bridge_seen) {
                 info!("Bridge heartbeat timeout, unpairing");
@@ -131,8 +128,17 @@ async fn tx_discovery_task(
                 s.backend.stop_transmit().await;
                 s.last_bridge_seen = None;
             }
-            signal_pairing_led(led_signal, s.bridge_paired);
+            s.bridge_paired
+        };
+        if led_paired != Some(paired) {
+            signal_pairing_led(led_signal, paired);
+            led_paired = Some(paired);
         }
+
+        if !hello_due(paired, last_hello) {
+            continue;
+        }
+        last_hello = Some(Instant::now());
 
         let beacon = EspnowMessage::Hello(proto::HelloBeacon {
             role: Role::Tx,

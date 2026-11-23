@@ -91,17 +91,14 @@ async fn turntable_discovery_task(
     led_signal: &'static Signal<NoopRawMutex, LedState>,
 ) {
     let mut buf = [0u8; proto::MAX_MSG_SIZE];
+    let mut last_hello = None;
+    let mut led_paired = None;
 
     loop {
-        let paired = bridge_mac.lock().await.is_some();
-        if paired {
-            Timer::after(Duration::from_secs(10)).await;
-        } else {
-            Timer::after(BEACON_INTERVAL).await;
-        }
+        Timer::after(BEACON_INTERVAL).await;
 
         // Check for stale bridge and unpair.
-        {
+        let paired = {
             let mut mac = bridge_mac.lock().await;
             let last = *last_bridge_seen.lock().await;
             if mac.is_some() && is_heartbeat_stale(last) {
@@ -110,8 +107,17 @@ async fn turntable_discovery_task(
                 *mac = None;
                 *last_bridge_seen.lock().await = None;
             }
-            signal_pairing_led(led_signal, mac.is_some());
+            mac.is_some()
+        };
+        if led_paired != Some(paired) {
+            signal_pairing_led(led_signal, paired);
+            led_paired = Some(paired);
         }
+
+        if !hello_due(paired, last_hello) {
+            continue;
+        }
+        last_hello = Some(Instant::now());
 
         let beacon = EspnowMessage::Hello(proto::HelloBeacon {
             role: Role::Turntable,
