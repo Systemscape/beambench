@@ -7,7 +7,9 @@ rustflags = [
 ]
 
 [target.riscv32imc-unknown-none-elf]
-runner = "probe-rs run --chip esp32c3 --always-print-stacktrace"
+# Use our partition table; the IDF default puts the app over `otadata`.
+# Relative path: run cargo from this directory.
+runner = "probe-rs run --chip esp32c3 --always-print-stacktrace --idf-partition-table partitions.csv --idf-target-app-partition ota_0"
 
 [env]
 DEFMT_LOG = "info"

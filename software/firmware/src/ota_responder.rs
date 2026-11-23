@@ -10,7 +10,10 @@ use esp_radio::esp_now::EspNowSender;
 use sha2::{Digest, Sha256};
 
 use beambench_protocol::{self as proto, EspnowMessage, OTA_CHUNK_SIZE};
-use esp_bootloader_esp_idf::partitions;
+use esp_bootloader_esp_idf::ota::OtaImageState;
+use esp_bootloader_esp_idf::partitions::{
+    self, AppPartitionSubType, DataPartitionSubType, PartitionType,
+};
 
 use crate::common::{COLOR_GREEN, COLOR_RED, LedState, OTA_IN_PROGRESS, SharedFlash};
 use core::sync::atomic::Ordering;
@@ -19,6 +22,8 @@ const CHUNK_SIZE: u32 = OTA_CHUNK_SIZE as u32;
 
 /// Active OTA session state.
 struct OtaSession {
+    /// Target OTA slot, the one not currently booted.
+    target: AppPartitionSubType,
     /// Absolute flash offset of the target OTA partition.
     partition_offset: u32,
     /// Size of the target OTA partition.
@@ -176,17 +181,16 @@ async fn handle_begin(
     // Determine which slot is currently booted (by checking otadata).
     // If we can't determine, default to writing to ota_0.
     let booted = pt.booted_partition();
-    let (target_offset, target_size) = match booted {
+    let (target, target_offset, target_size) = match booted {
         Ok(Some(entry))
-            if entry.partition_type()
-                == partitions::PartitionType::App(partitions::AppPartitionSubType::Ota0) =>
+            if entry.partition_type() == PartitionType::App(AppPartitionSubType::Ota0) =>
         {
             // Currently on ota_0, write to ota_1.
-            (ota1.offset(), ota1.len())
+            (AppPartitionSubType::Ota1, ota1.offset(), ota1.len())
         }
         _ => {
             // Currently on ota_1 or factory/unknown, write to ota_0.
-            (ota0.offset(), ota0.len())
+            (AppPartitionSubType::Ota0, ota0.offset(), ota0.len())
         }
     };
 
@@ -219,6 +223,7 @@ async fn handle_begin(
 
     let mut state = ota.lock().await;
     state.session = Some(OtaSession {
+        target,
         partition_offset: target_offset,
         partition_size: target_size,
         expected_sha256: sha256,
@@ -312,17 +317,16 @@ async fn handle_finish(
 
     // Switch the OTA slot.
     let mut f = flash.lock().await;
-    let mut pt_buf = [0u8; partitions::PARTITION_TABLE_MAX_LEN];
-    let mut updater =
-        match esp_bootloader_esp_idf::ota_updater::OtaUpdater::new(&mut f, &mut pt_buf) {
-            Ok(u) => u,
-            Err(e) => {
-                defmt::error!("OtaUpdater init failed: {:?}", defmt::Debug2Format(&e));
-                return Some(ota_error("ota updater init failed"));
-            }
-        };
+    let mut result = activate(&mut f, session.target);
+    if result == Err(partitions::Error::Invalid) {
+        // otadata holds no valid entries, e.g. an app image left from a
+        // flash with the default partition table. Erase it and retry.
+        defmt::warn!("otadata is corrupt, erasing it");
+        result = erase_otadata(&mut f).and_then(|()| activate(&mut f, session.target));
+    }
+    drop(f);
 
-    if let Err(e) = updater.activate_next_partition() {
+    if let Err(e) = result {
         defmt::error!(
             "Failed to activate partition: {:?}",
             defmt::Debug2Format(&e)
@@ -330,16 +334,40 @@ async fn handle_finish(
         return Some(ota_error("partition activation failed"));
     }
 
-    if let Err(e) = updater.set_current_ota_state(esp_bootloader_esp_idf::ota::OtaImageState::New) {
-        defmt::error!("Failed to set OTA state: {:?}", defmt::Debug2Format(&e));
-        return Some(ota_error("set ota state failed"));
-    }
-
-    drop(f);
-
     info!("OTA complete, rebooting in 2 seconds...");
 
     Some(EspnowMessage::OtaComplete)
+}
+
+/// Select `target` as the next boot slot and mark it as new.
+///
+/// Does not use `OtaUpdater::activate_next_partition`: with empty otadata it
+/// picks the booted slot. Its `set_current_app_partition(Ota1)` from empty
+/// otadata also writes sequence 0. Selecting ota_0 first gives sequence 1,
+/// then ota_1 gives sequence 2.
+fn activate(
+    flash: &mut esp_storage::FlashStorage<'_>,
+    target: AppPartitionSubType,
+) -> Result<(), partitions::Error> {
+    let mut pt_buf = [0u8; partitions::PARTITION_TABLE_MAX_LEN];
+    let mut updater = esp_bootloader_esp_idf::ota_updater::OtaUpdater::new(flash, &mut pt_buf)?;
+    let mut ota = updater.ota_data()?;
+    if ota.current_app_partition()? == AppPartitionSubType::Factory {
+        ota.set_current_app_partition(AppPartitionSubType::Ota0)?;
+    }
+    ota.set_current_app_partition(target)?;
+    ota.set_current_ota_state(OtaImageState::New)
+}
+
+/// Erase the whole otadata partition.
+fn erase_otadata(flash: &mut esp_storage::FlashStorage<'_>) -> Result<(), partitions::Error> {
+    let mut pt_buf = [0u8; partitions::PARTITION_TABLE_MAX_LEN];
+    let pt = partitions::read_partition_table(flash, &mut pt_buf)?;
+    let part = pt
+        .find_partition(PartitionType::Data(DataPartitionSubType::Ota))?
+        .ok_or(partitions::Error::Invalid)?;
+    let len = part.len();
+    part.as_flash_region(flash).erase(0, len)
 }
 
 /// After sending OtaComplete, the caller should schedule a reboot.
