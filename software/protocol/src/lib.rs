@@ -290,7 +290,6 @@ pub enum DeviceEvent {
     TurntableError {
         description: String<64>,
     },
-    HomeComplete,
 
     // RX responses
     Measurement {
@@ -588,7 +587,6 @@ mod test {
             },
             &mut buf,
         );
-        test_cobs_round_trip(&DeviceEvent::HomeComplete, &mut buf);
         test_cobs_round_trip(
             &DeviceEvent::Measurement {
                 rssi_dbm: -42.5,

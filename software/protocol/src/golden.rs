@@ -139,7 +139,6 @@ fn device_event_samples() -> Vec<(&'static str, DeviceEvent)> {
         DeviceEvent::TurntableError {
             description: s("stall"),
         },
-        DeviceEvent::HomeComplete,
         DeviceEvent::Measurement {
             rssi_dbm: -42.5,
             sample_count: 10,
@@ -174,7 +173,6 @@ fn device_event_samples() -> Vec<(&'static str, DeviceEvent)> {
                 DeviceEvent::TxAck => "TxAck",
                 DeviceEvent::MoveComplete { .. } => "MoveComplete",
                 DeviceEvent::TurntableError { .. } => "TurntableError",
-                DeviceEvent::HomeComplete => "HomeComplete",
                 DeviceEvent::Measurement { .. } => "Measurement",
                 DeviceEvent::Status { .. } => "Status",
                 DeviceEvent::Error { .. } => "Error",
@@ -192,17 +190,16 @@ const DEVICE_EVENT_V1: &[(&str, &str)] = &[
     ("TxAck", "01 00"),
     ("MoveComplete", "01 01 00 00 b4 42"),
     ("TurntableError", "01 02 05 73 74 61 6c 6c"),
-    ("HomeComplete", "01 03"),
-    ("Measurement", "01 04 00 00 2a c2 0a"),
+    ("Measurement", "01 03 00 00 2a c2 0a"),
     (
         "Status",
-        "01 05 01 00 01 06 65 73 70 6e 6f 77 01 e0 12 01 01 02 03 04 05 06 02",
+        "01 04 01 00 01 06 65 73 70 6e 6f 77 01 e0 12 01 01 02 03 04 05 06 02",
     ),
-    ("Error", "01 06 04 6f 6f 70 73"),
-    ("OtaReady", "01 07"),
-    ("OtaAck", "01 08 ac 02"),
-    ("OtaComplete", "01 09"),
-    ("OtaError", "01 0a 04 68 61 73 68"),
+    ("Error", "01 05 04 6f 6f 70 73"),
+    ("OtaReady", "01 06"),
+    ("OtaAck", "01 07 ac 02"),
+    ("OtaComplete", "01 08"),
+    ("OtaError", "01 09 04 68 61 73 68"),
 ];
 
 #[test]

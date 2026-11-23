@@ -194,9 +194,6 @@ async fn send_and_wait_move(
                 Some(beambench_protocol::DeviceEvent::MoveComplete { angle_deg }) => {
                     return Ok(angle_deg);
                 }
-                Some(beambench_protocol::DeviceEvent::HomeComplete) => {
-                    return Ok(0.0);
-                }
                 Some(beambench_protocol::DeviceEvent::TurntableError { description }) => {
                     return Err(description.to_string());
                 }

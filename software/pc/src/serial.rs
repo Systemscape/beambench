@@ -253,7 +253,7 @@ mod tests {
 
     #[tokio::test]
     async fn reader_decodes_single_frame() {
-        let msg = DeviceEvent::HomeComplete;
+        let msg = DeviceEvent::TxAck;
         let frame = encode_cobs_frame(&msg);
 
         let (resp_tx, mut resp_rx) = mpsc::channel::<DeviceEvent>(16);
@@ -334,7 +334,7 @@ mod tests {
         tokio::task::yield_now().await;
 
         // Now write a valid frame — reader should have reset and decode this.
-        let msg = DeviceEvent::HomeComplete;
+        let msg = DeviceEvent::TxAck;
         let frame = encode_cobs_frame(&msg);
         writer.write_all(&frame).await.unwrap();
         drop(writer);
@@ -348,7 +348,7 @@ mod tests {
 
     #[tokio::test]
     async fn reader_handles_multiple_frames_in_one_read() {
-        let msg1 = DeviceEvent::HomeComplete;
+        let msg1 = DeviceEvent::TxAck;
         let msg2 = DeviceEvent::Measurement {
             rssi_dbm: -50.0,
             sample_count: 5,
